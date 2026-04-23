@@ -1,7 +1,5 @@
 import { createClient } from "@tursodatabase/serverless/compat";
 
-const dbCache = new Map();
-
 function rowToObject(row, columns) {
   if (!row) return null;
 
@@ -22,7 +20,12 @@ function resultRows(rs) {
   return rows.map((row) => rowToObject(row, columns));
 }
 
-export function getDB(env) {
+function isRetryableLibsql404(error) {
+  const msg = String(error || "");
+  return msg.includes("LibsqlError") && msg.includes("HTTP error! status: 404");
+}
+
+function makeClient(env) {
   if (!env.TURSO_DATABASE_URL) {
     throw new Error("Missing TURSO_DATABASE_URL");
   }
@@ -31,26 +34,29 @@ export function getDB(env) {
     throw new Error("Missing TURSO_AUTH_TOKEN");
   }
 
-  const cacheKey = `${env.TURSO_DATABASE_URL}::${env.TURSO_AUTH_TOKEN}`;
-  if (dbCache.has(cacheKey)) {
-    return dbCache.get(cacheKey);
-  }
-
-  const client = createClient({
+  return createClient({
     url: env.TURSO_DATABASE_URL,
     authToken: env.TURSO_AUTH_TOKEN,
   });
+}
 
-  let readyPromise = null;
+async function execWithRetry(env, payload) {
+  let client = makeClient(env);
 
-  async function ensureReady() {
-    if (!readyPromise) {
-      readyPromise = client.execute("PRAGMA foreign_keys = ON");
+  try {
+    return await client.execute(payload);
+  } catch (error) {
+    if (!isRetryableLibsql404(error)) {
+      throw error;
     }
-    await readyPromise;
-  }
 
-  const db = {
+    client = makeClient(env);
+    return await client.execute(payload);
+  }
+}
+
+export function getDB(env) {
+  return {
     prepare(sql) {
       const state = {
         sql,
@@ -64,8 +70,7 @@ export function getDB(env) {
         },
 
         async all() {
-          await ensureReady();
-          const rs = await client.execute({
+          const rs = await execWithRetry(env, {
             sql: state.sql,
             args: state.args,
           });
@@ -76,8 +81,7 @@ export function getDB(env) {
         },
 
         async first() {
-          await ensureReady();
-          const rs = await client.execute({
+          const rs = await execWithRetry(env, {
             sql: state.sql,
             args: state.args,
           });
@@ -86,8 +90,7 @@ export function getDB(env) {
         },
 
         async run() {
-          await ensureReady();
-          const rs = await client.execute({
+          const rs = await execWithRetry(env, {
             sql: state.sql,
             args: state.args,
           });
@@ -110,19 +113,19 @@ export function getDB(env) {
     },
 
     async batch(statements) {
-      await ensureReady();
-
       let totalChanges = 0;
       let lastRowId = 0;
 
       for (const statement of statements) {
         const stmt = statement?.__toStmt ? statement.__toStmt() : statement;
-        const rs = await client.execute({
+
+        const rs = await execWithRetry(env, {
           sql: stmt.sql,
           args: stmt.args || [],
         });
 
         totalChanges += rs?.rowsAffected || 0;
+
         if (rs?.lastInsertRowid != null) {
           lastRowId = Number(rs.lastInsertRowid);
         }
@@ -136,7 +139,4 @@ export function getDB(env) {
       };
     },
   };
-
-  dbCache.set(cacheKey, db);
-  return db;
 }
