@@ -1,0 +1,8 @@
+{
+  "name": "youtube-main-turso",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@tursodatabase/serverless": "latest"
+  }
+}

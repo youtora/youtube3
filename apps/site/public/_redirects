@@ -1,0 +1,3 @@
+/api/* /api/:splat 200
+/k9p1/* /k9p1/:splat 200
+/websub/* /websub/:splat 200

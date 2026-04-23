@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="he">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Youtora Admin</title>
+  <style>
+    body{font-family:system-ui,Arial;max-width:900px;margin:24px auto;padding:0 12px}
+    input,button,textarea{padding:10px;font-size:16px}
+    textarea{width:100%;box-sizing:border-box;margin:6px 0 12px;min-height:180px;resize:vertical}
+    pre{background:#111;color:#eee;padding:12px;border-radius:12px;overflow:auto}
+  </style>
+</head>
+<body>
+  <h1>הוספת ערוצים</h1>
+
+  <label>Channel IDs / קישורי YouTube / @handle (אחד בכל שורה)</label>
+  <textarea
+    id="channel_input"
+    placeholder="UCdfdE6ZALvelEIIdM9Coq7g
+https://www.youtube.com/channel/UCdfdE6ZALvelEIIdM9Coq7g/
+https://www.youtube.com/@YouTubeCreators
+https://www.youtube.com/user/YouTube
+https://www.youtube.com/c/SomeChannel"
+  ></textarea>
+
+  <button onclick="addChannels()">הוסף ערוצים</button>
+  <pre id="out">מוכן.</pre>
+  <hr style="margin:24px 0">
+
+  <h2>ערוצים קיימים</h2>
+  <button onclick="loadChannels()">טען רשימת ערוצים</button>
+  <div id="channels" style="margin-top:12px"></div>
+
+<script>
+  const out = (x)=>document.getElementById('out').textContent =
+    typeof x === 'string' ? x : JSON.stringify(x, null, 2);
+
+  const esc = (s)=>String(s ?? "")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;");
+
+  function fmtTs(sec){
+    if(!sec) return "";
+    try{ return new Date(sec * 1000).toLocaleString("he-IL"); }
+    catch{ return String(sec); }
+  }
+
+  function extractDirectChannelId(raw){
+    const text = String(raw || "").trim();
+    if(!text) return null;
+
+    const directMatch = text.match(/\bUC[a-zA-Z0-9_-]{22}\b/);
+    if(directMatch) return directMatch[0];
+
+    try{
+      const url = new URL(text);
+      const parts = url.pathname.split("/").filter(Boolean);
+      const channelIndex = parts.findIndex((p)=>p.toLowerCase() === "channel");
+
+      if(channelIndex !== -1 && parts[channelIndex + 1]){
+        const maybeId = parts[channelIndex + 1].trim();
+        if(/^UC[a-zA-Z0-9_-]{22}$/.test(maybeId)) return maybeId;
+      }
+
+      const qId = url.searchParams.get("channel_id");
+      if(qId && /^UC[a-zA-Z0-9_-]{22}$/.test(qId)) return qId;
+    }catch{}
+
+    return null;
+  }
+
+  function parseChannelInputs(inputText){
+    const lines = String(inputText || "")
+      .split(/\r?\n/)
+      .map((x)=>x.trim())
+      .filter(Boolean);
+
+    const items = [];
+    const invalid = [];
+    const seenKeys = new Set();
+
+    for(const line of lines){
+      const channel_id = extractDirectChannelId(line);
+      const key = channel_id ? `id:${channel_id}` : `raw:${line}`;
+
+      if(seenKeys.has(key)) continue;
+      seenKeys.add(key);
+
+      if(channel_id){
+        items.push({ channel_id, raw_input: line });
+        continue;
+      }
+
+      if(
+        /^https?:\/\//i.test(line) ||
+        /^@[-a-zA-Z0-9._]+$/.test(line) ||
+        /^[a-zA-Z0-9.-]+\.youtube\.com\//i.test(line) ||
+        /^(youtube\.com|www\.youtube\.com|m\.youtube\.com)\//i.test(line)
+      ){
+        items.push({ raw_input: line });
+        continue;
+      }
+
+      invalid.push(line);
+    }
+
+    return { items, invalid };
+  }
+
+  async function addSingleChannel(item){
+    const res = await fetch('/k9p1/add-channel', {
+      method:'POST',
+      headers:{ 'content-type':'application/json' },
+      body:JSON.stringify(item)
+    });
+
+    const text = await res.text();
+    let data;
+
+    try{ data = JSON.parse(text); }
+    catch{ data = text; }
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      request_item: item,
+      data
+    };
+  }
+
+  async function addChannels(){
+    const raw = document.getElementById('channel_input').value;
+    const parsed = parseChannelInputs(raw);
+
+    if(!parsed.items.length && !parsed.invalid.length){
+      return out("לא הוזן כלום.");
+    }
+
+    if(!parsed.items.length){
+      return out({
+        message: "לא נמצאו שורות תקינות.",
+        invalid_lines: parsed.invalid
+      });
+    }
+
+    out({
+      message: `נמצאו ${parsed.items.length} שורות תקינות. מתחיל הוספה...`,
+      items: parsed.items,
+      invalid_lines: parsed.invalid
+    });
+
+    const results = [];
+
+    for(let i = 0; i < parsed.items.length; i++){
+      const item = parsed.items[i];
+      out(`מוסיף ${i + 1} מתוך ${parsed.items.length}: ${item.channel_id || item.raw_input}`);
+      const result = await addSingleChannel(item);
+      results.push(result);
+    }
+
+    const success = results.filter((x)=>x.ok);
+    const failed = results.filter((x)=>!x.ok);
+
+    out({
+      summary: {
+        requested: parsed.items.length,
+        success: success.length,
+        failed: failed.length,
+        invalid_lines: parsed.invalid.length
+      },
+      added: success.map((x)=>({
+        requested: x.request_item.channel_id || x.request_item.raw_input,
+        channel_id: x.data?.channel_id || null,
+        title: x.data?.title || null,
+        resolved_via: x.data?.resolved_via || null
+      })),
+      failed_items: failed.map((x)=>({
+        requested: x.request_item.channel_id || x.request_item.raw_input,
+        status: x.status,
+        data: x.data
+      })),
+      invalid_lines: parsed.invalid
+    });
+
+    if(success.length){
+      loadChannels();
+    }
+  }
+
+  function renderChannels(chs){
+    if(!chs.length) return "<div>אין ערוצים.</div>";
+
+    return `
+      <table style="width:100%;border-collapse:collapse">
+        <thead>
+          <tr>
+            <th style="text-align:right;padding:6px;border-bottom:1px solid #ddd">ערוץ</th>
+            <th style="text-align:right;padding:6px;border-bottom:1px solid #ddd">WebSub</th>
+            <th style="text-align:right;padding:6px;border-bottom:1px solid #ddd">עודכן</th>
+            <th style="text-align:right;padding:6px;border-bottom:1px solid #ddd"></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${chs.map((c)=>`
+            <tr data-channel-id="${esc(c.channel_id)}" style="border-bottom:1px solid #f0f0f0">
+              <td style="padding:8px">
+                <div style="display:flex;gap:10px;align-items:center">
+                  ${c.thumbnail_url ? `<img src="${esc(c.thumbnail_url)}" style="width:44px;height:44px;border-radius:12px;object-fit:cover">` : ``}
+                  <div>
+                    <div style="font-weight:600">${esc(c.title || "")}</div>
+                    <div style="font-size:13px;color:#555">${esc(c.channel_id)}</div>
+                  </div>
+                </div>
+              </td>
+              <td style="padding:8px">
+                <div>${esc(c.websub_status || "")}</div>
+                ${c.last_error ? `<div style="font-size:12px;color:#b00">${esc(c.last_error)}</div>` : ``}
+              </td>
+              <td style="padding:8px">${fmtTs(c.updated_at)}</td>
+              <td style="padding:8px;text-align:left">
+                <button
+                  onclick="purgeChannel('${esc(c.channel_id)}')"
+                  style="background:#b00;color:#fff;border:0;border-radius:10px;padding:8px 10px;cursor:pointer"
+                >
+                  מחק לגמרי
+                </button>
+              </td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  async function loadChannels(){
+    const box = document.getElementById("channels");
+    box.innerHTML = "טוען…";
+
+    const res = await fetch("/k9p1/channels", {
+      method:"GET"
+    });
+
+    const text = await res.text();
+    let data;
+
+    try{ data = JSON.parse(text); }
+    catch{
+      return box.innerHTML = `<pre>${esc(text)}</pre>`;
+    }
+
+    if(!res.ok){
+      return box.innerHTML = `<pre>${esc(JSON.stringify({ status: res.status, data }, null, 2))}</pre>`;
+    }
+
+    window.__channels = data.channels || [];
+    box.innerHTML = renderChannels(window.__channels);
+  }
+
+  async function purgeChannel(channel_id){
+    if(!confirm("מחיקה מלאה מהמסד: videos/playlists/subscriptions/backfill + הערוץ עצמו. להמשיך?")) return;
+
+    const res = await fetch("/k9p1/channels", {
+      method:"POST",
+      headers:{ "content-type":"application/json" },
+      body:JSON.stringify({ action:"purge", channel_id })
+    });
+
+    const text = await res.text();
+    let data;
+
+    try{ data = JSON.parse(text); }
+    catch{ data = text; }
+
+    out({ status: res.status, data });
+
+    if(res.ok){
+      const row = document.querySelector(`tr[data-channel-id="${CSS.escape(channel_id)}"]`);
+      if(row) row.remove();
+    }
+  }
+</script>
+</body>
+</html>

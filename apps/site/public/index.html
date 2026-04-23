@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Youtora</title>
+  <meta name="description" content="Youtora - ספריית סרטונים, ערוצים ופלייליסטים מתעדכנת." />
+  <meta name="robots" content="index,follow,max-image-preview:large" />
+  <link rel="canonical" href="/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Youtora" />
+  <meta property="og:title" content="Youtora" />
+  <meta property="og:description" content="Youtora - ספריית סרטונים, ערוצים ופלייליסטים מתעדכנת." />
+  <meta property="og:image" content="/default-og.png" />
+  <meta property="og:url" content="/" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Youtora" />
+  <meta name="twitter:description" content="Youtora - ספריית סרטונים, ערוצים ופלייליסטים מתעדכנת." />
+  <meta name="twitter:image" content="/default-og.png" />
+  <script id="structured-data" type="application/ld+json"></script>
+  <meta name="theme-color" content="#ff4d6d" />
+  <link rel="icon" type="image/svg+xml" href="/youtora-mark.svg">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" data-link aria-label="Youtora">
+      <img class="brandLogo" src="/youtora-logo.svg" alt="Youtora" />
+    </a>
+
+    <form class="search" id="searchForm" role="search">
+      <input id="searchInput" placeholder="חיפוש בכותרות…" autocomplete="off" />
+      <button type="submit" aria-label="חפש">
+        <svg class="searchIcon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M10.5 4a6.5 6.5 0 1 0 4.03 11.6l4.44 4.45 1.41-1.42-4.44-4.44A6.5 6.5 0 0 0 10.5 4Zm0 2a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9Z" fill="currentColor"/>
+        </svg>
+      </button>
+    </form>
+
+    <nav class="nav">
+      <a class="navLink" href="/" data-link>בית</a>
+      <a class="navLink" href="/shorts" data-link>שורטים</a>
+      <a class="navLink" href="/live" data-link>שידורים חיים</a>
+      <a class="navLink" href="/channels" data-link>ערוצים</a>
+      <a class="navLink" href="/playlists" data-link>פלייליסטים</a>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <div id="page" class="page"></div>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>
