@@ -165,7 +165,7 @@ function json(obj, status = 200) {
 }
 
 export async function onRequest({ env, request }) {
-  env.DB = env.DB || getDB(env);
+  const DB = getDB(env);
   const url = new URL(request.url);
   const debug = url.searchParams.get("debug") === "1";
 
@@ -194,13 +194,13 @@ export async function onRequest({ env, request }) {
 
     const channelId = channelIdFromTopic(topic);
     const ch = channelId
-      ? await env.DB.prepare(`SELECT id FROM channels WHERE channel_id=? LIMIT 1`).bind(channelId).first()
+      ? await DB.prepare(`SELECT id FROM channels WHERE channel_id=? LIMIT 1`).bind(channelId).first()
       : null;
 
     const channelInt = ch?.id ?? null;
 
     if (topic && channelInt) {
-      await env.DB.prepare(`
+      await DB.prepare(`
         INSERT INTO subscriptions(topic_url, channel_int, status, lease_expires_at, last_subscribed_at, last_error)
         VALUES(?, ?, 'active', ?, ?, NULL)
         ON CONFLICT(topic_url) DO UPDATE SET
@@ -272,7 +272,7 @@ export async function onRequest({ env, request }) {
     let channelInt = null;
 
     if (topicHdr) {
-      const sub = await env.DB.prepare(`
+      const sub = await DB.prepare(`
         SELECT channel_int
         FROM subscriptions
         WHERE topic_url=?
@@ -286,7 +286,7 @@ export async function onRequest({ env, request }) {
       const channelId = channelIdFromTopic(topicHdr) || (entries.find(e => e.channelId)?.channelId || null);
 
       if (channelId) {
-        const ch = await env.DB.prepare(`
+        const ch = await DB.prepare(`
           SELECT id
           FROM channels
           WHERE channel_id=?
@@ -316,7 +316,7 @@ export async function onRequest({ env, request }) {
       const meta = videoMeta.get(e.videoId) || {};
       const videoKind = meta.video_kind ?? null;
       const durationSec = meta.duration_sec ?? null;
-      stmts.push(env.DB.prepare(`
+      stmts.push(DB.prepare(`
         INSERT INTO videos(video_id, channel_int, title, published_at, video_kind, duration_sec, updated_at)
         VALUES(?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
@@ -335,7 +335,7 @@ export async function onRequest({ env, request }) {
       `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, now));
     }
 
-    if (stmts.length) await env.DB.batch(stmts);
+    if (stmts.length) await DB.batch(stmts);
 
     console.log("websub POST saved", { channelInt, entries: entries.length, first: entries[0]?.videoId || null });
 

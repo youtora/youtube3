@@ -139,7 +139,7 @@ function pickPlaylistThumbVideoId(thumbnails) {
   return null;
 }
 
-async function importPlaylistsForChannel({ env, channel_int, channel_id, max_pages = 10 }) {
+async function importPlaylistsForChannel({ env, DB, channel_int, channel_id, max_pages = 10 }) {
   if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0 };
 
   let pageToken = null;
@@ -173,7 +173,7 @@ async function importPlaylistsForChannel({ env, channel_int, channel_id, max_pag
       const thumb_video_id = pickPlaylistThumbVideoId(it?.snippet?.thumbnails);
 
       stmts.push(
-        env.DB.prepare(`
+        DB.prepare(`
           INSERT INTO playlists(playlist_id, channel_int, title, thumb_video_id, published_at, item_count, updated_at)
           VALUES(?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(playlist_id) DO UPDATE SET
@@ -189,7 +189,7 @@ async function importPlaylistsForChannel({ env, channel_int, channel_id, max_pag
       imported++;
     }
 
-    if (stmts.length) await env.DB.batch(stmts);
+    if (stmts.length) await DB.batch(stmts);
 
     pageToken = data?.nextPageToken || null;
     if (!pageToken) break;
@@ -198,14 +198,14 @@ async function importPlaylistsForChannel({ env, channel_int, channel_id, max_pag
   return { ok: true, imported };
 }
 
-async function subscribeWebSub({ env, request, channel_id, channel_int }) {
+async function subscribeWebSub({ env, DB, request, channel_id, channel_int }) {
   const t = nowSec();
   const origin = new URL(request.url).origin;
   const callback = `${origin}/websub/youtube`;
   const topic = `https://www.youtube.com/xml/feeds/videos.xml?channel_id=${encodeURIComponent(channel_id)}`;
   const hub = "https://pubsubhubbub.appspot.com/subscribe";
 
-  const existing = await env.DB.prepare(`
+  const existing = await DB.prepare(`
     SELECT status, lease_expires_at
     FROM subscriptions
     WHERE topic_url=?
@@ -225,7 +225,7 @@ async function subscribeWebSub({ env, request, channel_id, channel_int }) {
   if (!env.WEBSUB_VERIFY_TOKEN) {
     const last_error = "missing WEBSUB_VERIFY_TOKEN";
 
-    await env.DB.prepare(`
+    await DB.prepare(`
       INSERT INTO subscriptions(topic_url, channel_int, status, last_subscribed_at, last_error)
       VALUES(?, ?, 'pending', ?, ?)
       ON CONFLICT(topic_url) DO UPDATE SET
@@ -252,7 +252,7 @@ async function subscribeWebSub({ env, request, channel_id, channel_int }) {
 
   const last_error = res.ok ? null : `hub subscribe failed: ${res.status}`;
 
-  await env.DB.prepare(`
+  await DB.prepare(`
     INSERT INTO subscriptions(topic_url, channel_int, status, last_subscribed_at, last_error)
     VALUES(?, ?, 'pending', ?, ?)
     ON CONFLICT(topic_url) DO UPDATE SET
@@ -269,7 +269,8 @@ async function subscribeWebSub({ env, request, channel_id, channel_int }) {
 }
 
 export async function onRequest({ env, request }) {
-  env.DB = env.DB || getDB(env);
+  const DB = getDB(env);
+  const runtimeEnv = { ...env, DB };
   if (request.method !== "POST") return new Response("use POST", { status: 200 });
 
   const body = await request.json().catch(() => ({}));
@@ -312,7 +313,7 @@ export async function onRequest({ env, request }) {
     uploads = item?.contentDetails?.relatedPlaylists?.uploads || null;
   }
 
-  await env.DB.prepare(`
+  await DB.prepare(`
     INSERT INTO channels(channel_id, title, thumbnail_url, is_active, created_at, updated_at)
     VALUES(?, ?, ?, 1, ?, ?)
     ON CONFLICT(channel_id) DO UPDATE SET
@@ -322,11 +323,11 @@ export async function onRequest({ env, request }) {
       updated_at = excluded.updated_at
   `).bind(channel_id, title, thumb, t, t).run();
 
-  const ch = await env.DB.prepare(`SELECT id FROM channels WHERE channel_id=?`).bind(channel_id).first();
+  const ch = await DB.prepare(`SELECT id FROM channels WHERE channel_id=?`).bind(channel_id).first();
   if (!ch) return new Response("failed to load channel row", { status: 500 });
   const channel_int = ch.id;
 
-  await env.DB.prepare(`
+  await DB.prepare(`
     INSERT INTO channel_backfill(channel_int, uploads_playlist_id, next_page_token, done, imported_count, updated_at)
     VALUES(?, ?, NULL, 0, 0, ?)
     ON CONFLICT(channel_int) DO UPDATE SET
@@ -334,10 +335,11 @@ export async function onRequest({ env, request }) {
       updated_at = excluded.updated_at
   `).bind(channel_int, uploads, t).run();
 
-  const websub = await subscribeWebSub({ env, request, channel_id, channel_int });
+  const websub = await subscribeWebSub({ env: runtimeEnv, DB, request, channel_id, channel_int });
 
   const playlists = await importPlaylistsForChannel({
-    env,
+    env: runtimeEnv,
+    DB,
     channel_int,
     channel_id,
     max_pages: playlists_pages

@@ -5,11 +5,11 @@ import { getDB } from "../_db.js";
 function unauthorized() { return new Response("unauthorized", { status: 401 }); }
 
 export async function onRequest({ env, request }) {
-  env.DB = env.DB || getDB(env);
+  const DB = getDB(env);
 
   if (request.method === "GET") {
     // קריאה אחת: רשימת ערוצים + מצב WebSub אם קיים
-    const rows = await env.DB.prepare(`
+    const rows = await DB.prepare(`
       SELECT c.id,
              c.channel_id,
              c.title,
@@ -35,7 +35,7 @@ export async function onRequest({ env, request }) {
 
     if (action !== "purge") return new Response("unsupported action", { status: 400 });
 
-    const ch = await env.DB.prepare(`
+    const ch = await DB.prepare(`
       SELECT id
       FROM channels
       WHERE channel_id = ?
@@ -50,34 +50,34 @@ export async function onRequest({ env, request }) {
     // כאן נעשה "best effort": אם אין table/אי אפשר למחוק - ממשיכים.
     let delFts = 0;
     try {
-      const r = await env.DB.prepare(`
+      const r = await DB.prepare(`
         DELETE FROM video_fts
         WHERE rowid IN (SELECT id FROM videos WHERE channel_int = ?)
       `).bind(channel_int).run();
       delFts = r?.meta?.changes || 0;
     } catch (_) {}
 
-    const delVideos = await env.DB.prepare(`
+    const delVideos = await DB.prepare(`
       DELETE FROM videos
       WHERE channel_int = ?
     `).bind(channel_int).run();
 
-    const delPlaylists = await env.DB.prepare(`
+    const delPlaylists = await DB.prepare(`
       DELETE FROM playlists
       WHERE channel_int = ?
     `).bind(channel_int).run();
 
-    const delSubs = await env.DB.prepare(`
+    const delSubs = await DB.prepare(`
       DELETE FROM subscriptions
       WHERE channel_int = ?
     `).bind(channel_int).run();
 
-    const delBackfill = await env.DB.prepare(`
+    const delBackfill = await DB.prepare(`
       DELETE FROM channel_backfill
       WHERE channel_int = ?
     `).bind(channel_int).run();
 
-    const delChannel = await env.DB.prepare(`
+    const delChannel = await DB.prepare(`
       DELETE FROM channels
       WHERE id = ?
     `).bind(channel_int).run();

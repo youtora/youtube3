@@ -1,7 +1,7 @@
 import { getDB } from "../_db.js";
 
 export async function onRequest({ env, request }) {
-  env.DB = env.DB || getDB(env);
+  const DB = getDB(env);
   const url = new URL(request.url);
 
   const limit = 200;
@@ -31,7 +31,7 @@ export async function onRequest({ env, request }) {
   if (kind) {
     rows =
       (cursorP !== null && cursorId !== null)
-        ? await env.DB.prepare(`
+        ? await DB.prepare(`
             SELECT
               v.id,
               v.video_id,
@@ -50,7 +50,7 @@ export async function onRequest({ env, request }) {
             ORDER BY v.published_at DESC, v.id DESC
             LIMIT ?
           `).bind(kind, cursorP, cursorId, limit).all()
-        : await env.DB.prepare(`
+        : await DB.prepare(`
             SELECT
               v.id,
               v.video_id,
@@ -71,7 +71,7 @@ export async function onRequest({ env, request }) {
   } else {
     rows =
       (cursorP !== null && cursorId !== null)
-        ? await env.DB.prepare(`
+        ? await DB.prepare(`
             SELECT
               v.id,
               v.video_id,
@@ -89,7 +89,7 @@ export async function onRequest({ env, request }) {
             ORDER BY v.published_at DESC, v.id DESC
             LIMIT ?
           `).bind(cursorP, cursorId, limit).all()
-        : await env.DB.prepare(`
+        : await DB.prepare(`
             SELECT
               v.id,
               v.video_id,

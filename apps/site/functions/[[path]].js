@@ -2,7 +2,7 @@ import { getDB } from "./_db.js";
 
 export async function onRequest(context) {
   const { env } = context;
-  env.DB = env.DB || getDB(env);
+  const DB = getDB(env);
 
   const { request } = context;
   const currentUrl = new URL(request.url);

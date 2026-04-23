@@ -1,7 +1,7 @@
 import { getDB } from "../_db.js";
 
 export async function onRequest({ env, request }) {
-  env.DB = env.DB || getDB(env);
+  const DB = getDB(env);
   const url = new URL(request.url);
 
   if (request.method !== "GET") {
@@ -14,7 +14,7 @@ export async function onRequest({ env, request }) {
   }
 
   // שים לב: אין פה thumbnail_url בכלל
-  const playlist = await env.DB.prepare(`
+  const playlist = await DB.prepare(`
     SELECT
       p.playlist_id,
       p.title,

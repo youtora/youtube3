@@ -17,7 +17,7 @@ function parseCursor(raw) {
 }
 
 export async function onRequest({ env, request }) {
-  env.DB = env.DB || getDB(env);
+  const DB = getDB(env);
   const url = new URL(request.url);
 
   const channel_id = (url.searchParams.get("channel_id") || "").trim();
@@ -38,7 +38,7 @@ export async function onRequest({ env, request }) {
 
   const { p: cursorP, id: cursorId } = parseCursor(videos_cursor_raw);
 
-  const chRow = await env.DB.prepare(
+  const chRow = await DB.prepare(
     include_channel || include_playlists
       ? `
         SELECT id, channel_id, title, thumbnail_url
@@ -66,7 +66,7 @@ export async function onRequest({ env, request }) {
 
   if (include_playlists) {
     const plLimit = clamp(parseInt(url.searchParams.get("playlists_limit") || "50", 10), 1, 200);
-    const pls = await env.DB.prepare(`
+    const pls = await DB.prepare(`
       SELECT playlist_id, title, thumb_video_id, published_at, item_count
       FROM playlists
       WHERE channel_int = ?
@@ -83,7 +83,7 @@ export async function onRequest({ env, request }) {
     if (kind) {
       vids =
         (cursorP !== null && cursorId > 0)
-          ? await env.DB.prepare(`
+          ? await DB.prepare(`
               SELECT id, video_id, title, published_at, video_kind, duration_sec
               FROM videos
               WHERE channel_int = ?
@@ -92,7 +92,7 @@ export async function onRequest({ env, request }) {
               ORDER BY published_at DESC, id DESC
               LIMIT ?
             `).bind(chRow.id, kind, cursorP, cursorId, videos_limit).all()
-          : await env.DB.prepare(`
+          : await DB.prepare(`
               SELECT id, video_id, title, published_at, video_kind, duration_sec
               FROM videos
               WHERE channel_int = ?
@@ -103,7 +103,7 @@ export async function onRequest({ env, request }) {
     } else {
       vids =
         (cursorP !== null && cursorId > 0)
-          ? await env.DB.prepare(`
+          ? await DB.prepare(`
               SELECT id, video_id, title, published_at, video_kind, duration_sec
               FROM videos INDEXED BY idx_videos_channel_cover
               WHERE channel_int = ?
@@ -111,7 +111,7 @@ export async function onRequest({ env, request }) {
               ORDER BY published_at DESC, id DESC
               LIMIT ?
             `).bind(chRow.id, cursorP, cursorId, videos_limit).all()
-          : await env.DB.prepare(`
+          : await DB.prepare(`
               SELECT id, video_id, title, published_at, video_kind, duration_sec
               FROM videos INDEXED BY idx_videos_channel_cover
               WHERE channel_int = ?

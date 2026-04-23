@@ -1,8 +1,8 @@
 import { getDB } from "../_db.js";
 
 export async function onRequest({ env }) {
-  env.DB = env.DB || getDB(env);
-  const rows = await env.DB.prepare(`
+  const DB = getDB(env);
+  const rows = await DB.prepare(`
     SELECT id, channel_id, title, thumbnail_url
     FROM channels
     WHERE is_active = 1

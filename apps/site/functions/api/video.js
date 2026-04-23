@@ -5,14 +5,14 @@ function clamp(n, a, b) {
 }
 
 export async function onRequest({ env, request }) {
-  env.DB = env.DB || getDB(env);
+  const DB = getDB(env);
   const url = new URL(request.url);
   const video_id = (url.searchParams.get("video_id") || "").trim();
   if (!video_id) return new Response("missing video_id", { status: 400 });
 
   const recLimit = clamp(parseInt(url.searchParams.get("recommended_limit") || "20", 10), 1, 60);
 
-  const vrow = await env.DB.prepare(`
+  const vrow = await DB.prepare(`
     SELECT id, video_id, title, published_at, channel_int, video_kind, duration_sec
     FROM videos
     WHERE video_id = ?
@@ -21,7 +21,7 @@ export async function onRequest({ env, request }) {
 
   if (!vrow) return new Response("not found", { status: 404 });
 
-  const crow = await env.DB.prepare(`
+  const crow = await DB.prepare(`
     SELECT channel_id, title AS channel_title, thumbnail_url
     FROM channels
     WHERE id = ?
@@ -39,7 +39,7 @@ export async function onRequest({ env, request }) {
     thumbnail_url: crow?.thumbnail_url || null,
   };
 
-  const rec = await env.DB.prepare(`
+  const rec = await DB.prepare(`
     SELECT
       v.video_id,
       v.title,

@@ -1,7 +1,8 @@
 import { createClient } from "@tursodatabase/serverless/compat";
 
+const dbCache = new Map();
+
 function createDB(env) {
-  if (env.__TURSO_DB__) return env.__TURSO_DB__;
 
   if (!env.TURSO_DATABASE_URL) {
     throw new Error("Missing TURSO_DATABASE_URL");
@@ -10,6 +11,9 @@ function createDB(env) {
   if (!env.TURSO_AUTH_TOKEN) {
     throw new Error("Missing TURSO_AUTH_TOKEN");
   }
+
+  const cacheKey = `${env.TURSO_DATABASE_URL}::${env.TURSO_AUTH_TOKEN}`;
+  if (dbCache.has(cacheKey)) return dbCache.get(cacheKey);
 
   const client = createClient({
     url: env.TURSO_DATABASE_URL,
@@ -104,16 +108,32 @@ function createDB(env) {
     async batch(statements) {
       await ensureReady();
 
-      const stmts = statements.map((statement) => {
-        if (statement?.__toStmt) return statement.__toStmt();
-        return statement;
-      });
+      let totalChanges = 0;
+      let lastRowId = 0;
 
-      return client.batch(stmts, "write");
+      for (const statement of statements) {
+        const stmt = statement?.__toStmt ? statement.__toStmt() : statement;
+        const rs = await client.execute({
+          sql: stmt.sql,
+          args: stmt.args || [],
+        });
+
+        totalChanges += rs?.rowsAffected || 0;
+        if (rs?.lastInsertRowid != null) {
+          lastRowId = Number(rs.lastInsertRowid);
+        }
+      }
+
+      return {
+        meta: {
+          changes: totalChanges,
+          last_row_id: lastRowId,
+        },
+      };
     },
   };
 
-  env.__TURSO_DB__ = db;
+  dbCache.set(cacheKey, db);
   return db;
 }
 function nowSec(){ return Math.floor(Date.now()/1000); }

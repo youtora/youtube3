@@ -21,7 +21,7 @@ function toFtsMatch(cleaned) {
 }
 
 export async function onRequest({ env, request }) {
-  env.DB = env.DB || getDB(env);
+  const DB = getDB(env);
   const url = new URL(request.url);
 
   const qRaw = url.searchParams.get("q") || "";
@@ -41,7 +41,7 @@ export async function onRequest({ env, request }) {
   }
 
   const fts = (Number.isFinite(cursor) && cursor > 0)
-    ? await env.DB.prepare(`
+    ? await DB.prepare(`
         SELECT rowid
         FROM video_fts
         WHERE video_fts MATCH ?
@@ -49,7 +49,7 @@ export async function onRequest({ env, request }) {
         ORDER BY rowid DESC
         LIMIT ?
       `).bind(match, cursor, limit).all()
-    : await env.DB.prepare(`
+    : await DB.prepare(`
         SELECT rowid
         FROM video_fts
         WHERE video_fts MATCH ?
@@ -66,7 +66,7 @@ export async function onRequest({ env, request }) {
   }
 
   const placeholders = ids.map(() => "?").join(",");
-  const vids = await env.DB.prepare(`
+  const vids = await DB.prepare(`
     SELECT
       v.id,
       v.video_id,

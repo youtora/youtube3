@@ -1,7 +1,7 @@
 import { getDB } from "../_db.js";
 
 export async function onRequest({ env, request }) {
-  env.DB = env.DB || getDB(env);
+  const DB = getDB(env);
   const url = new URL(request.url);
   const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || "60", 10), 1), 200);
 
@@ -13,7 +13,7 @@ export async function onRequest({ env, request }) {
     if (!Number.isNaN(id) && id > 0) cursorId = id;
   }
 
-  const rows = await env.DB.prepare(`
+  const rows = await DB.prepare(`
     SELECT p.id, p.playlist_id, p.title, p.thumb_video_id, p.published_at, p.item_count,
            c.channel_id, c.title AS channel_title
     FROM playlists p
