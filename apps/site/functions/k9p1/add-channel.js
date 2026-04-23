@@ -139,6 +139,68 @@ function pickPlaylistThumbVideoId(thumbnails) {
   return null;
 }
 
+function parseIsoDurationSec(iso) {
+  const m = String(iso || "").match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
+  if (!m) return null;
+  const days = parseInt(m[1] || "0", 10);
+  const hours = parseInt(m[2] || "0", 10);
+  const mins = parseInt(m[3] || "0", 10);
+  const secs = parseInt(m[4] || "0", 10);
+  return (((days * 24) + hours) * 60 + mins) * 60 + secs;
+}
+
+function classifyVideoItem(it) {
+  if (it?.liveStreamingDetails) return "L";
+
+  const sec = parseIsoDurationSec(it?.contentDetails?.duration || "");
+  if (!(Number.isFinite(sec) && sec > 0 && sec <= 180)) return "";
+
+  const w = Number(it?.player?.embedWidth || 0);
+  const h = Number(it?.player?.embedHeight || 0);
+
+  if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > w) {
+    return "S";
+  }
+
+  return "";
+}
+
+function extractDurationSec(it) {
+  const sec = parseIsoDurationSec(it?.contentDetails?.duration || "");
+  return Number.isFinite(sec) && sec > 0 ? sec : null;
+}
+
+function buildVideoMeta(it) {
+  return {
+    video_kind: classifyVideoItem(it),
+    duration_sec: extractDurationSec(it),
+  };
+}
+
+async function fetchVideoMeta(env, ids) {
+  const out = new Map();
+  const uniq = [...new Set((ids || []).filter(Boolean))];
+  if (!env.YT_API_KEY || !uniq.length) return out;
+
+  for (let i = 0; i < uniq.length; i += 50) {
+    const chunk = uniq.slice(i, i + 50);
+    const u = new URL("https://www.googleapis.com/youtube/v3/videos");
+    u.searchParams.set("part", "contentDetails,liveStreamingDetails,player");
+    u.searchParams.set("id", chunk.join(","));
+    u.searchParams.set("maxResults", String(chunk.length));
+    u.searchParams.set("maxWidth", "8192");
+    u.searchParams.set("maxHeight", "8192");
+    u.searchParams.set("key", env.YT_API_KEY);
+
+    const data = await ytJson(u.toString());
+    for (const it of (data?.items || [])) {
+      if (it?.id) out.set(it.id, buildVideoMeta(it));
+    }
+  }
+
+  return out;
+}
+
 async function importPlaylistsForChannel({ env, DB, channel_int, channel_id, max_pages = 10 }) {
   if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0 };
 
@@ -198,12 +260,66 @@ async function importPlaylistsForChannel({ env, DB, channel_int, channel_id, max
   return { ok: true, imported };
 }
 
+async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, max_pages = 2 }) {
+  if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0 };
+  if (!uploads_playlist_id) return { ok: false, reason: "missing uploads playlist", imported: 0 };
+
+  let pageToken = null;
+  let imported = 0;
+
+  for (let page = 0; page < max_pages; page++) {
+    const u = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
+    u.searchParams.set("part", "snippet,contentDetails");
+    u.searchParams.set("playlistId", uploads_playlist_id);
+    u.searchParams.set("maxResults", "50");
+    if (pageToken) u.searchParams.set("pageToken", pageToken);
+    u.searchParams.set("key", env.YT_API_KEY);
+
+    const data = await ytJson(u.toString());
+    const items = data?.items || [];
+    const metaMap = await fetchVideoMeta(env, items.map((it) => it?.contentDetails?.videoId).filter(Boolean));
+    const stmts = [];
+    const now = nowSec();
+
+    for (const it of items) {
+      const vid = it?.contentDetails?.videoId || null;
+      if (!vid) continue;
+
+      const sn = it?.snippet || {};
+      const title = (sn?.title || "").slice(0, 200);
+      const published_at = toUnixSeconds(sn?.publishedAt || null) ?? 0;
+      const meta = metaMap.get(vid) || {};
+      const video_kind = meta.video_kind ?? null;
+      const duration_sec = meta.duration_sec ?? null;
+
+      stmts.push(DB.prepare(`
+        INSERT INTO videos(video_id, channel_int, title, published_at, video_kind, duration_sec, updated_at)
+        VALUES(?,?,?,?,?,?,?)
+        ON CONFLICT(video_id) DO UPDATE SET
+          title=excluded.title,
+          published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
+          video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
+          duration_sec=CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
+          updated_at=excluded.updated_at
+      `).bind(vid, channel_int, title, published_at, video_kind, duration_sec, now));
+
+      imported++;
+    }
+
+    if (stmts.length) await DB.batch(stmts);
+
+    pageToken = data?.nextPageToken || null;
+    if (!pageToken) break;
+  }
+
+  return { ok: true, imported };
+}
+
 async function subscribeWebSub({ env, DB, request, channel_id, channel_int }) {
   const t = nowSec();
-  const origin = new URL(request.url).origin;
-  const callback = `${origin}/websub/youtube`;
+  const callback = env.WEBSUB_CALLBACK_URL || `${new URL(request.url).origin}/websub/youtube`;
   const topic = `https://www.youtube.com/xml/feeds/videos.xml?channel_id=${encodeURIComponent(channel_id)}`;
-  const hub = "https://pubsubhubbub.appspot.com/subscribe";
+  const hub = env.WEBSUB_HUB_URL || "https://pubsubhubbub.appspot.com/subscribe";
 
   const existing = await DB.prepare(`
     SELECT status, lease_expires_at
@@ -221,6 +337,7 @@ async function subscribeWebSub({ env, DB, request, channel_id, channel_int }) {
   params.set("hub.callback", callback);
   params.set("hub.topic", topic);
   params.set("hub.verify", "async");
+  params.set("hub.lease_seconds", String(env.WEBSUB_LEASE_SECONDS || 432000));
 
   if (!env.WEBSUB_VERIFY_TOKEN) {
     const last_error = "missing WEBSUB_VERIFY_TOKEN";
@@ -277,6 +394,7 @@ export async function onRequest({ env, request }) {
   const raw_input = String(body.raw_input || "").trim();
   const requested_channel_id = String(body.channel_id || "").trim();
   const playlists_pages = Math.min(Math.max(parseInt(body.playlists_pages || "10", 10), 1), 30);
+  const videos_pages = Math.min(Math.max(parseInt(body.videos_pages || "2", 10), 0), 10);
 
   let resolved;
   try {
@@ -332,18 +450,52 @@ export async function onRequest({ env, request }) {
     VALUES(?, ?, NULL, 0, 0, ?)
     ON CONFLICT(channel_int) DO UPDATE SET
       uploads_playlist_id = COALESCE(excluded.uploads_playlist_id, channel_backfill.uploads_playlist_id),
+      done = 0,
       updated_at = excluded.updated_at
   `).bind(channel_int, uploads, t).run();
 
-  const websub = await subscribeWebSub({ env: runtimeEnv, DB, request, channel_id, channel_int });
+  const warnings = [];
 
-  const playlists = await importPlaylistsForChannel({
-    env: runtimeEnv,
-    DB,
-    channel_int,
-    channel_id,
-    max_pages: playlists_pages
-  });
+  let websub = { ok: false, skipped: true, reason: "not attempted" };
+  try {
+    websub = await subscribeWebSub({ env: runtimeEnv, DB, request, channel_id, channel_int });
+    if (!websub?.ok && !websub?.skipped) warnings.push({ step: "websub", detail: websub });
+  } catch (error) {
+    websub = { ok: false, skipped: false, reason: String(error?.message || error) };
+    warnings.push({ step: "websub", error: websub.reason });
+  }
+
+  let playlists = { ok: false, imported: 0, reason: "not attempted" };
+  try {
+    playlists = await importPlaylistsForChannel({
+      env: runtimeEnv,
+      DB,
+      channel_int,
+      channel_id,
+      max_pages: playlists_pages
+    });
+    if (!playlists?.ok) warnings.push({ step: "playlists", detail: playlists });
+  } catch (error) {
+    playlists = { ok: false, imported: 0, reason: String(error?.message || error) };
+    warnings.push({ step: "playlists", error: playlists.reason });
+  }
+
+  let videos = { ok: false, imported: 0, reason: "not attempted" };
+  if (videos_pages > 0) {
+    try {
+      videos = await importRecentVideosForChannel({
+        env: runtimeEnv,
+        DB,
+        channel_int,
+        uploads_playlist_id: uploads,
+        max_pages: videos_pages,
+      });
+      if (!videos?.ok) warnings.push({ step: "videos", detail: videos });
+    } catch (error) {
+      videos = { ok: false, imported: 0, reason: String(error?.message || error) };
+      warnings.push({ step: "videos", error: videos.reason });
+    }
+  }
 
   return Response.json({
     ok: true,
@@ -354,6 +506,8 @@ export async function onRequest({ env, request }) {
     title,
     uploads_playlist_id: uploads,
     websub,
-    playlists
+    playlists,
+    videos,
+    warnings,
   });
 }
