@@ -2,34 +2,5 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "youtube3-cron",
   "main": "src/index.js",
-  "compatibility_date": "2026-04-23",
-
-  "keep_vars": true,
-
-  "vars": {
-    "TURSO_DATABASE_URL": "libsql://youtora-db-youtora.aws-eu-west-1.turso.io",
-    "WEBSUB_CALLBACK_URL": "https://youtube3-367.pages.dev/websub/youtube",
-    "WEBSUB_HUB_URL": "https://pubsubhubbub.appspot.com/subscribe",
-    "WEBSUB_LEASE_SECONDS": "432000"
-  },
-
-  "observability": {
-    "enabled": true,
-    "head_sampling_rate": 1,
-    "logs": {
-      "enabled": true,
-      "head_sampling_rate": 1,
-      "persist": true,
-      "invocation_logs": true
-    },
-    "traces": {
-      "enabled": false,
-      "persist": true,
-      "head_sampling_rate": 1
-    }
-  },
-
-  "triggers": {
-    "crons": ["*/5 * * * *"]
-  }
+  "compatibility_date": "2026-04-23"
 }
