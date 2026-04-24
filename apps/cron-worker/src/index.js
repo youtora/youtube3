@@ -317,7 +317,7 @@ async function backfillSome(env, maxCalls=20){
       const u = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
       u.searchParams.set("part","snippet,contentDetails");
       u.searchParams.set("playlistId", playlistId);
-      u.searchParams.set("maxResults","50");
+      u.searchParams.set("maxResults","10");
       if(r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
       u.searchParams.set("key", env.YT_API_KEY);
 
@@ -417,7 +417,7 @@ async function catchUpFeeds(env, maxChannels=5){
 
     if(feed.ok){
       const xml = await feed.text();
-      const entries = extractEntries(xml);
+      const entries = extractEntries(xml).slice(0, 10);
 
       if(entries.length){
         const now = nowSec();
@@ -544,7 +544,7 @@ async function refreshPlaylistsMonthly(env, perRun=5, maxPages=10){
       const u = new URL("https://www.googleapis.com/youtube/v3/playlists");
       u.searchParams.set("part","snippet,contentDetails");
       u.searchParams.set("channelId", ch.channel_id);
-      u.searchParams.set("maxResults","50");
+      u.searchParams.set("maxResults","10");
       if(pageToken) u.searchParams.set("pageToken", pageToken);
       u.searchParams.set("key", env.YT_API_KEY);
 
@@ -597,34 +597,57 @@ async function refreshPlaylistsMonthly(env, perRun=5, maxPages=10){
 
 
 
-async function runCron(env) {
+async function runCron(env, opts = {}) {
   const runtimeEnv = { ...env, DB: createDB(env) };
   const started = nowSec();
   await setState(runtimeEnv, "cron_last_run", String(started));
 
-  let lastErr = "";
+  const feedLimit = Number.isFinite(opts.feedLimit) ? opts.feedLimit : 1;
+  const backfillLimit = Number.isFinite(opts.backfillLimit) ? opts.backfillLimit : 1;
+  const renewLimit = Number.isFinite(opts.renewLimit) ? opts.renewLimit : 1;
+  const playlistChannels = Number.isFinite(opts.playlistChannels) ? opts.playlistChannels : 1;
+  const playlistPages = Number.isFinite(opts.playlistPages) ? opts.playlistPages : 1;
 
-  try { await catchUpFeeds(runtimeEnv, 5); }
+  let lastErr = "";
+  const steps = {};
+
+  try {
+    await catchUpFeeds(runtimeEnv, feedLimit);
+    steps.catchUpFeeds = { ok: true, limit: feedLimit };
+  }
   catch (e) {
     lastErr = `catchUpFeeds: ${e?.stack || e}`;
+    steps.catchUpFeeds = { ok: false, limit: feedLimit, error: String(e?.message || e) };
     console.log(`catchUpFeeds error`, e);
   }
 
-  try { await backfillSome(runtimeEnv, 3); }
+  try {
+    await backfillSome(runtimeEnv, backfillLimit);
+    steps.backfillSome = { ok: true, limit: backfillLimit };
+  }
   catch (e) {
     if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
+    steps.backfillSome = { ok: false, limit: backfillLimit, error: String(e?.message || e) };
     console.log(`backfillSome error`, e);
   }
 
-  try { await renewNeeded(runtimeEnv, 2, 2 * 24 * 3600); }
+  try {
+    await renewNeeded(runtimeEnv, renewLimit, 2 * 24 * 3600);
+    steps.renewNeeded = { ok: true, limit: renewLimit };
+  }
   catch (e) {
     if (!lastErr) lastErr = `renewNeeded: ${e?.stack || e}`;
+    steps.renewNeeded = { ok: false, limit: renewLimit, error: String(e?.message || e) };
     console.log(`renewNeeded error`, e);
   }
 
-  try { await refreshPlaylistsMonthly(runtimeEnv, 1, 2); }
+  try {
+    await refreshPlaylistsMonthly(runtimeEnv, playlistChannels, playlistPages);
+    steps.refreshPlaylistsMonthly = { ok: true, channels: playlistChannels, pages: playlistPages };
+  }
   catch (e) {
     if (!lastErr) lastErr = `refreshPlaylistsMonthly: ${e?.stack || e}`;
+    steps.refreshPlaylistsMonthly = { ok: false, channels: playlistChannels, pages: playlistPages, error: String(e?.message || e) };
     console.log(`refreshPlaylistsMonthly error`, e);
   }
 
@@ -642,6 +665,14 @@ async function runCron(env) {
     cron_last_run,
     cron_last_ok,
     cron_last_error,
+    steps,
+    limits: {
+      feedLimit,
+      backfillLimit,
+      renewLimit,
+      playlistChannels,
+      playlistPages,
+    },
   };
 }
 
@@ -736,11 +767,12 @@ function renderHome(status) {
       </div>
       <div class="actions">
         <form method="post" action="/run-now">
-          <button type="submit">הפעל עכשיו ידנית</button>
+          <button type="submit">הפעל עכשיו ידנית (קל)</button>
         </form>
         <a href="/health">JSON מצב</a>
       </div>
-      <p style="margin-top:18px">אם הגדרת <code>ADMIN_BASIC_USER</code> ו־<code>ADMIN_BASIC_PASS</code> בוורקר, הדף הזה יהיה מוגן בסיסמה.</p>
+      <p style="margin-top:18px">ההרצה הידנית מפעילה מצב קל כדי לא ליפול על מגבלת subrequests.</p>
+      <p>אם הגדרת <code>ADMIN_BASIC_USER</code> ו־<code>ADMIN_BASIC_PASS</code> בוורקר, הדף הזה יהיה מוגן בסיסמה.</p>
     </div>
   </div>
 </body>
@@ -764,7 +796,7 @@ export default {
       }
 
       if (request.method === "POST" && url.pathname === "/run-now") {
-        const result = await runCron(env);
+        const result = await runCron(env, { feedLimit: 1, backfillLimit: 1, renewLimit: 1, playlistChannels: 1, playlistPages: 1 });
         return Response.json({
           ok: result.ok,
           message: result.ok ? "manual run finished" : "manual run finished with errors",
@@ -773,7 +805,7 @@ export default {
       }
 
       if (request.method === "GET" && url.pathname === "/run-now") {
-        const result = await runCron(env);
+        const result = await runCron(env, { feedLimit: 1, backfillLimit: 1, renewLimit: 1, playlistChannels: 1, playlistPages: 1 });
         return Response.json({
           ok: result.ok,
           message: result.ok ? "manual run finished" : "manual run finished with errors",
@@ -796,6 +828,7 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runCron(env));
+    console.log(`scheduled fired: ${event.cron || "unknown"}`);
+    ctx.waitUntil(runCron(env, { feedLimit: 1, backfillLimit: 1, renewLimit: 1, playlistChannels: 1, playlistPages: 1 }));
   }
 };
