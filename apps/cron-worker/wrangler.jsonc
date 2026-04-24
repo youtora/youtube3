@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "youtube3-cron",
+  "name": "youtube4-cron",
   "main": "src/index.js",
   "compatibility_date": "2026-04-23",
   "keep_vars": true,
