@@ -2,6 +2,15 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "youtube3-cron",
   "main": "src/index.js",
-  "compatibility_date": "2026-04-23"
-  "keep_vars": true
+  "compatibility_date": "2026-04-23",
+  "keep_vars": true,
+
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "head_sampling_rate": 1
+    }
+  }
 }
