@@ -1,9 +1,11 @@
 import { createClient } from "@tursodatabase/serverless/compat";
 
-const dbCache = new Map();
+function isRetryableLibsql404(error) {
+  const msg = String(error || "");
+  return msg.includes("LibsqlError") && msg.includes("HTTP error! status: 404");
+}
 
 function createDB(env) {
-
   if (!env.TURSO_DATABASE_URL) {
     throw new Error("Missing TURSO_DATABASE_URL");
   }
@@ -11,9 +13,6 @@ function createDB(env) {
   if (!env.TURSO_AUTH_TOKEN) {
     throw new Error("Missing TURSO_AUTH_TOKEN");
   }
-
-  const cacheKey = `${env.TURSO_DATABASE_URL}::${env.TURSO_AUTH_TOKEN}`;
-  if (dbCache.has(cacheKey)) return dbCache.get(cacheKey);
 
   const client = createClient({
     url: env.TURSO_DATABASE_URL,
@@ -27,6 +26,17 @@ function createDB(env) {
       readyPromise = client.execute("PRAGMA foreign_keys = ON");
     }
     await readyPromise;
+  }
+
+  async function execute(payload) {
+    await ensureReady();
+
+    try {
+      return await client.execute(payload);
+    } catch (error) {
+      if (!isRetryableLibsql404(error)) throw error;
+      return client.execute(payload);
+    }
   }
 
   function rowsToObjects(rs) {
@@ -46,7 +56,7 @@ function createDB(env) {
     });
   }
 
-  const db = {
+  return {
     prepare(sql) {
       const state = {
         sql,
@@ -60,8 +70,7 @@ function createDB(env) {
         },
 
         async all() {
-          await ensureReady();
-          const rs = await client.execute({
+          const rs = await execute({
             sql: state.sql,
             args: state.args,
           });
@@ -72,8 +81,7 @@ function createDB(env) {
         },
 
         async first() {
-          await ensureReady();
-          const rs = await client.execute({
+          const rs = await execute({
             sql: state.sql,
             args: state.args,
           });
@@ -82,8 +90,7 @@ function createDB(env) {
         },
 
         async run() {
-          await ensureReady();
-          const rs = await client.execute({
+          const rs = await execute({
             sql: state.sql,
             args: state.args,
           });
@@ -106,14 +113,12 @@ function createDB(env) {
     },
 
     async batch(statements) {
-      await ensureReady();
-
       let totalChanges = 0;
       let lastRowId = 0;
 
       for (const statement of statements) {
         const stmt = statement?.__toStmt ? statement.__toStmt() : statement;
-        const rs = await client.execute({
+        const rs = await execute({
           sql: stmt.sql,
           args: stmt.args || [],
         });
@@ -132,10 +137,8 @@ function createDB(env) {
       };
     },
   };
-
-  dbCache.set(cacheKey, db);
-  return db;
 }
+
 function nowSec(){ return Math.floor(Date.now()/1000); }
 function toUnixSeconds(iso){
   const ms = Date.parse(iso || "");
@@ -592,41 +595,207 @@ async function refreshPlaylistsMonthly(env, perRun=5, maxPages=10){
   await setState(env, "pl_cursor", String(last));
 }
 
+
+
+async function runCron(env) {
+  const runtimeEnv = { ...env, DB: createDB(env) };
+  const started = nowSec();
+  await setState(runtimeEnv, "cron_last_run", String(started));
+
+  let lastErr = "";
+
+  try { await catchUpFeeds(runtimeEnv, 5); }
+  catch (e) {
+    lastErr = `catchUpFeeds: ${e?.stack || e}`;
+    console.log(`catchUpFeeds error`, e);
+  }
+
+  try { await backfillSome(runtimeEnv, 3); }
+  catch (e) {
+    if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
+    console.log(`backfillSome error`, e);
+  }
+
+  try { await renewNeeded(runtimeEnv, 2, 2 * 24 * 3600); }
+  catch (e) {
+    if (!lastErr) lastErr = `renewNeeded: ${e?.stack || e}`;
+    console.log(`renewNeeded error`, e);
+  }
+
+  try { await refreshPlaylistsMonthly(runtimeEnv, 1, 2); }
+  catch (e) {
+    if (!lastErr) lastErr = `refreshPlaylistsMonthly: ${e?.stack || e}`;
+    console.log(`refreshPlaylistsMonthly error`, e);
+  }
+
+  await setState(runtimeEnv, "cron_last_error", lastErr);
+  if (!lastErr) {
+    await setState(runtimeEnv, "cron_last_ok", String(nowSec()));
+  }
+
+  const cron_last_run = await getState(runtimeEnv, "cron_last_run", "");
+  const cron_last_ok = await getState(runtimeEnv, "cron_last_ok", "");
+  const cron_last_error = await getState(runtimeEnv, "cron_last_error", "");
+
+  return {
+    ok: !lastErr,
+    cron_last_run,
+    cron_last_ok,
+    cron_last_error,
+  };
+}
+
+function getBasicAuthCredentials(request) {
+  const auth = request.headers.get("authorization") || "";
+  if (!auth.startsWith("Basic ")) return null;
+
+  try {
+    const decoded = atob(auth.slice(6));
+    const idx = decoded.indexOf(":");
+    if (idx === -1) return null;
+    return {
+      user: decoded.slice(0, idx),
+      pass: decoded.slice(idx + 1),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function requireOptionalBasicAuth(request, env) {
+  if (!env.ADMIN_BASIC_USER || !env.ADMIN_BASIC_PASS) {
+    return null;
+  }
+
+  const creds = getBasicAuthCredentials(request);
+  if (creds?.user === env.ADMIN_BASIC_USER && creds?.pass === env.ADMIN_BASIC_PASS) {
+    return null;
+  }
+
+  return new Response("Unauthorized", {
+    status: 401,
+    headers: {
+      "WWW-Authenticate": 'Basic realm="youtube3-cron"',
+      "content-type": "text/plain; charset=utf-8",
+    },
+  });
+}
+
+function toLocalDisplay(unixSec) {
+  if (!unixSec) return "—";
+  const n = Number(unixSec);
+  if (!Number.isFinite(n) || n <= 0) return "—";
+  return new Date(n * 1000).toLocaleString("he-IL");
+}
+
+async function getStatus(env) {
+  const runtimeEnv = { ...env, DB: createDB(env) };
+  return {
+    ok: true,
+    db: true,
+    cron_last_run: await getState(runtimeEnv, "cron_last_run", ""),
+    cron_last_ok: await getState(runtimeEnv, "cron_last_ok", ""),
+    cron_last_error: await getState(runtimeEnv, "cron_last_error", ""),
+  };
+}
+
+function renderHome(status) {
+  const html = `<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>youtube3-cron</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:#f6f7fb;color:#111;margin:0;padding:24px}
+    .wrap{max-width:780px;margin:0 auto}
+    .card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.06)}
+    h1{margin:0 0 12px;font-size:28px}
+    p{margin:8px 0}
+    .grid{display:grid;grid-template-columns:180px 1fr;gap:10px 14px;margin:18px 0}
+    .key{color:#555}
+    .actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px}
+    button,a{appearance:none;border:0;border-radius:12px;padding:12px 16px;font-size:16px;cursor:pointer;text-decoration:none}
+    button{background:#111;color:#fff}
+    a{background:#eef2ff;color:#1d4ed8}
+    code{background:#f3f4f6;padding:2px 6px;border-radius:8px}
+    .ok{color:#166534}
+    .bad{color:#b91c1c;white-space:pre-wrap;word-break:break-word}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>youtube3-cron</h1>
+      <p>דף בקרה לוורקר הקרון.</p>
+      <div class="grid">
+        <div class="key">DB</div><div class="${status.db ? "ok" : "bad"}">${status.db ? "מחובר" : "שגיאה"}</div>
+        <div class="key">ריצה אחרונה</div><div>${toLocalDisplay(status.cron_last_run)}</div>
+        <div class="key">הצלחה אחרונה</div><div>${toLocalDisplay(status.cron_last_ok)}</div>
+        <div class="key">שגיאה אחרונה</div><div class="${status.cron_last_error ? "bad" : "ok"}">${status.cron_last_error || "אין"}</div>
+      </div>
+      <div class="actions">
+        <form method="post" action="/run-now">
+          <button type="submit">הפעל עכשיו ידנית</button>
+        </form>
+        <a href="/health">JSON מצב</a>
+      </div>
+      <p style="margin-top:18px">אם הגדרת <code>ADMIN_BASIC_USER</code> ו־<code>ADMIN_BASIC_PASS</code> בוורקר, הדף הזה יהיה מוגן בסיסמה.</p>
+    </div>
+  </div>
+</body>
+</html>`;
+  return new Response(html, {
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+}
+
 export default {
-  async scheduled(event, env, ctx){
-    env.DB = env.DB || createDB(env);
-    ctx.waitUntil((async ()=>{
-      const started = nowSec();
-      await setState(env, "cron_last_run", String(started));
+  async fetch(request, env, ctx) {
+    const authResponse = requireOptionalBasicAuth(request, env);
+    if (authResponse) return authResponse;
 
-      let lastErr = "";
+    const url = new URL(request.url);
 
-      try { await catchUpFeeds(env, 5); }
-      catch (e) {
-        lastErr = `catchUpFeeds: ${e?.stack || e}`;
-        console.log(`catchUpFeeds error`, e);
+    try {
+      if (request.method === "GET" && url.pathname === "/health") {
+        const status = await getStatus(env);
+        return Response.json(status);
       }
 
-      try { await backfillSome(env, 3); }
-      catch (e) {
-        if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
-        console.log(lastErr);
+      if (request.method === "POST" && url.pathname === "/run-now") {
+        const result = await runCron(env);
+        return Response.json({
+          ok: result.ok,
+          message: result.ok ? "manual run finished" : "manual run finished with errors",
+          ...result,
+        });
       }
 
-      try { await renewNeeded(env, 2, 2*24*3600); }
-      catch (e) {
-        if (!lastErr) lastErr = `renewNeeded: ${e?.stack || e}`;
-        console.log(`renewNeeded error`, e);
+      if (request.method === "GET" && url.pathname === "/run-now") {
+        const result = await runCron(env);
+        return Response.json({
+          ok: result.ok,
+          message: result.ok ? "manual run finished" : "manual run finished with errors",
+          ...result,
+        });
       }
 
-      try { await refreshPlaylistsMonthly(env, 1, 2); }
-      catch (e) {
-        if (!lastErr) lastErr = `refreshPlaylistsMonthly: ${e?.stack || e}`;
-        console.log(`refreshPlaylistsMonthly error`, e);
+      if (request.method === "GET" && url.pathname === "/") {
+        const status = await getStatus(env);
+        return renderHome(status);
       }
 
-      await setState(env, "cron_last_error", lastErr);
-      if (!lastErr) await setState(env, "cron_last_ok", String(nowSec()));
-    })());
+      return new Response("Not found", { status: 404 });
+    } catch (error) {
+      return Response.json({
+        ok: false,
+        error: String(error?.stack || error || "unknown error"),
+      }, { status: 500 });
+    }
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runCron(env));
   }
 };
