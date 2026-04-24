@@ -3,4 +3,5 @@
   "name": "youtube3-cron",
   "main": "src/index.js",
   "compatibility_date": "2026-04-23"
+  "keep_vars": true
 }
