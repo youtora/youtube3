@@ -274,7 +274,6 @@ function isPlaylistNotFoundError(err){
   const msg = String(err?.message || err || "");
   return msg.includes("YT 404") && msg.includes("playlistId");
 }
-/** backfill ערוצים: מייבא היסטוריה מה-Uploads playlist */
 async function backfillSome(env, maxCalls=20){
   if(!env.YT_API_KEY) return;
 
@@ -287,7 +286,7 @@ async function backfillSome(env, maxCalls=20){
     LIMIT ?
   `).bind(maxCalls).all();
 
-   for(const r of (rows?.results || [])){
+  for(const r of (rows?.results || [])){
     const playlistId = r.uploads_playlist_id;
 
     if(!playlistId){
@@ -309,17 +308,21 @@ async function backfillSome(env, maxCalls=20){
 
       const data = await ytJson(u.toString());
       const items = data?.items || [];
-      const metaMap = await fetchVideoMeta(env, items.map(it => it?.contentDetails?.videoId).filter(Boolean));
+      const metaMap = await fetchVideoMeta(
+        env,
+        items.map(it => it?.contentDetails?.videoId).filter(Boolean)
+      );
 
       const now = nowSec();
       const stmts = [];
+      const stmtVideoIds = [];
 
       for(const it of items){
-        const vid = it?.contentDetails?.videoId || null;
+        const vid = String(it?.contentDetails?.videoId || "").trim();
         if(!vid) continue;
 
         const sn = it?.snippet || {};
-        const title = (sn?.title || "").slice(0,200);
+        const title = String(sn?.title || "").slice(0,200) || "[untitled]";
         const published_at = toUnixSeconds(sn?.publishedAt || null) ?? 0;
         const meta = metaMap.get(vid) || {};
         const video_kind = meta.video_kind ?? null;
@@ -338,11 +341,34 @@ async function backfillSome(env, maxCalls=20){
             videos.title IS NOT excluded.title
             OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
             OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind,'') != excluded.video_kind)
-            OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec,-1) != excluded.duration_sec)
+            OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec,-1) != COALESCE(excluded.duration_sec,-1))
         `).bind(vid, r.channel_int, title, published_at, video_kind, duration_sec, now));
+
+        stmtVideoIds.push(vid);
       }
 
-      if(stmts.length) await env.DB.batch(stmts);
+      let importedOk = 0;
+
+      if(stmts.length){
+        try {
+          await env.DB.batch(stmts);
+          importedOk = stmts.length;
+        } catch (batchErr) {
+          console.log(`backfillSome batch fallback channel_int=${r.channel_int} playlistId=${playlistId}`, batchErr);
+
+          for(let i=0; i<stmts.length; i++){
+            try {
+              await stmts[i].run();
+              importedOk++;
+            } catch (itemErr) {
+              console.log(
+                `backfillSome item skip channel_int=${r.channel_int} playlistId=${playlistId} video_id=${stmtVideoIds[i]}`,
+                itemErr
+              );
+            }
+          }
+        }
+      }
 
       const next = data?.nextPageToken || null;
       const done = next ? 0 : 1;
@@ -353,7 +379,8 @@ async function backfillSome(env, maxCalls=20){
             imported_count = imported_count + ?,
             updated_at=?
         WHERE channel_int=?
-      `).bind(next, done, items.length, nowSec(), r.channel_int).run();
+      `).bind(next, done, importedOk, nowSec(), r.channel_int).run();
+
     } catch (e) {
       if(isPlaylistNotFoundError(e)){
         console.log(`backfillSome skip invalid playlistId=${playlistId} channel_int=${r.channel_int}`);
