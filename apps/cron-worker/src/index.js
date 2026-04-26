@@ -288,94 +288,134 @@ function isPlaylistNotFoundError(err){
   const msg = String(err?.message || err || "");
   return msg.includes("YT 404") && msg.includes("playlistId");
 }
+function safeVideoTitle(value) {
+  const t = String(value || "").trim();
+  return (t || "Untitled").slice(0, 200);
+}
+
 /** backfill ערוצים: מייבא היסטוריה מה-Uploads playlist */
-async function backfillSome(env, maxCalls=20){
-  if(!env.YT_API_KEY) return;
+async function backfillSome(env, maxCalls = 20) {
+  if (!env.YT_API_KEY) return;
 
   const rows = await env.DB.prepare(`
     SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token
     FROM channel_backfill cb
     JOIN channels c ON c.id = cb.channel_int
-    WHERE cb.done=0 AND c.is_active=1
+    WHERE cb.done = 0 AND c.is_active = 1
     ORDER BY cb.channel_int ASC
     LIMIT ?
   `).bind(maxCalls).all();
 
-   for(const r of (rows?.results || [])){
+  for (const r of (rows?.results || [])) {
     const playlistId = r.uploads_playlist_id;
 
-    if(!playlistId){
+    if (!playlistId) {
       await env.DB.prepare(`
         UPDATE channel_backfill
-        SET done=1, updated_at=?
-        WHERE channel_int=?
+        SET done = 1, updated_at = ?
+        WHERE channel_int = ?
       `).bind(nowSec(), r.channel_int).run();
       continue;
     }
 
     try {
       const u = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
-      u.searchParams.set("part","snippet,contentDetails");
+      u.searchParams.set("part", "snippet,contentDetails");
       u.searchParams.set("playlistId", playlistId);
-      u.searchParams.set("maxResults","10");
-      if(r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
+      u.searchParams.set("maxResults", "50");
+      if (r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
       u.searchParams.set("key", env.YT_API_KEY);
 
       const data = await ytJson(u.toString());
       const items = data?.items || [];
-      const metaMap = await fetchVideoMeta(env, items.map(it => it?.contentDetails?.videoId).filter(Boolean));
+      const metaMap = await fetchVideoMeta(
+        env,
+        items.map((it) => it?.contentDetails?.videoId).filter(Boolean)
+      );
 
       const now = nowSec();
-      const stmts = [];
+      let importedOk = 0;
+      let failedCount = 0;
 
-      for(const it of items){
+      for (const it of items) {
         const vid = it?.contentDetails?.videoId || null;
-        if(!vid) continue;
+        if (!vid) continue;
 
         const sn = it?.snippet || {};
-        const title = (sn?.title || "").slice(0,200);
+        const title = safeVideoTitle(sn?.title);
         const published_at = toUnixSeconds(sn?.publishedAt || null) ?? 0;
         const meta = metaMap.get(vid) || {};
         const video_kind = meta.video_kind ?? null;
         const duration_sec = meta.duration_sec ?? null;
 
-        stmts.push(env.DB.prepare(`
-          INSERT INTO videos(video_id, channel_int, title, published_at, video_kind, duration_sec, updated_at)
-          VALUES(?,?,?,?,?,?,?)
-          ON CONFLICT(video_id) DO UPDATE SET
-            title=excluded.title,
-            published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
-            video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
-            duration_sec=CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
-            updated_at=excluded.updated_at
-          WHERE
-            videos.title IS NOT excluded.title
-            OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
-            OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind,'') != excluded.video_kind)
-            OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec,-1) != excluded.duration_sec)
-        `).bind(vid, r.channel_int, title, published_at, video_kind, duration_sec, now));
-      }
+        try {
+          await env.DB.prepare(`
+            INSERT INTO videos(video_id, channel_int, title, published_at, video_kind, duration_sec, updated_at)
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(video_id) DO UPDATE SET
+              title = excluded.title,
+              published_at = CASE
+                WHEN excluded.published_at > 0 THEN excluded.published_at
+                ELSE videos.published_at
+              END,
+              video_kind = CASE
+                WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind
+                ELSE videos.video_kind
+              END,
+              duration_sec = CASE
+                WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec
+                ELSE videos.duration_sec
+              END,
+              updated_at = excluded.updated_at
+            WHERE
+              videos.title IS NOT excluded.title
+              OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at, 0) != COALESCE(excluded.published_at, 0))
+              OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind, '') != excluded.video_kind)
+              OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec, -1) != excluded.duration_sec)
+          `).bind(
+            vid,
+            r.channel_int,
+            title,
+            published_at,
+            video_kind,
+            duration_sec,
+            now
+          ).run();
 
-      if(stmts.length) await env.DB.batch(stmts);
+          importedOk++;
+        } catch (e) {
+          failedCount++;
+          console.log(
+            `backfillSome item skip channel_int=${r.channel_int} playlistId=${playlistId} video_id=${vid}`,
+            e
+          );
+        }
+      }
 
       const next = data?.nextPageToken || null;
       const done = next ? 0 : 1;
 
       await env.DB.prepare(`
         UPDATE channel_backfill
-        SET next_page_token=?, done=?,
+        SET next_page_token = ?, done = ?,
             imported_count = imported_count + ?,
-            updated_at=?
-        WHERE channel_int=?
-      `).bind(next, done, items.length, nowSec(), r.channel_int).run();
+            updated_at = ?
+        WHERE channel_int = ?
+      `).bind(next, done, importedOk, nowSec(), r.channel_int).run();
+
+      if (failedCount > 0) {
+        console.log(
+          `backfillSome page partial channel_int=${r.channel_int} playlistId=${playlistId} imported=${importedOk} failed=${failedCount} next=${next || ""}`
+        );
+      }
     } catch (e) {
-      if(isPlaylistNotFoundError(e)){
+      if (isPlaylistNotFoundError(e)) {
         console.log(`backfillSome skip invalid playlistId=${playlistId} channel_int=${r.channel_int}`);
 
         await env.DB.prepare(`
           UPDATE channel_backfill
-          SET done=1, next_page_token=NULL, updated_at=?
-          WHERE channel_int=?
+          SET done = 1, next_page_token = NULL, updated_at = ?
+          WHERE channel_int = ?
         `).bind(nowSec(), r.channel_int).run();
 
         continue;
