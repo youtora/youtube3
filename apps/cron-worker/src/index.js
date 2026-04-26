@@ -302,7 +302,7 @@ async function backfillSome(env, maxCalls=20){
       const u = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
       u.searchParams.set("part","snippet,contentDetails");
       u.searchParams.set("playlistId", playlistId);
-      u.searchParams.set("maxResults","50");
+      u.searchParams.set("maxResults","5");
       if(r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
       u.searchParams.set("key", env.YT_API_KEY);
 
@@ -349,24 +349,15 @@ async function backfillSome(env, maxCalls=20){
 
       let importedOk = 0;
 
-      if(stmts.length){
+      for(let i=0; i<stmts.length; i++){
         try {
-          await env.DB.batch(stmts);
-          importedOk = stmts.length;
-        } catch (batchErr) {
-          console.log(`backfillSome batch fallback channel_int=${r.channel_int} playlistId=${playlistId}`, batchErr);
-
-          for(let i=0; i<stmts.length; i++){
-            try {
-              await stmts[i].run();
-              importedOk++;
-            } catch (itemErr) {
-              console.log(
-                `backfillSome item skip channel_int=${r.channel_int} playlistId=${playlistId} video_id=${stmtVideoIds[i]}`,
-                itemErr
-              );
-            }
-          }
+          await stmts[i].run();
+          importedOk++;
+        } catch (itemErr) {
+          console.log(
+            `backfillSome item skip channel_int=${r.channel_int} playlistId=${playlistId} video_id=${stmtVideoIds[i]}`,
+            itemErr
+          );
         }
       }
 
