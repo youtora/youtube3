@@ -113,28 +113,14 @@ function createDB(env) {
     },
 
     async batch(statements) {
-      let totalChanges = 0;
-      let lastRowId = 0;
+      await ensureReady();
 
-      for (const statement of statements) {
-        const stmt = statement?.__toStmt ? statement.__toStmt() : statement;
-        const rs = await execute({
-          sql: stmt.sql,
-          args: stmt.args || [],
-        });
+      const stmts = statements.map((statement) => {
+        if (statement?.__toStmt) return statement.__toStmt();
+        return statement;
+      });
 
-        totalChanges += rs?.rowsAffected || 0;
-        if (rs?.lastInsertRowid != null) {
-          lastRowId = Number(rs.lastInsertRowid);
-        }
-      }
-
-      return {
-        meta: {
-          changes: totalChanges,
-          last_row_id: lastRowId,
-        },
-      };
+      return client.batch(stmts, "write");
     },
   };
 }
@@ -288,134 +274,94 @@ function isPlaylistNotFoundError(err){
   const msg = String(err?.message || err || "");
   return msg.includes("YT 404") && msg.includes("playlistId");
 }
-function safeVideoTitle(value) {
-  const t = String(value || "").trim();
-  return (t || "Untitled").slice(0, 200);
-}
-
 /** backfill ערוצים: מייבא היסטוריה מה-Uploads playlist */
-async function backfillSome(env, maxCalls = 20) {
-  if (!env.YT_API_KEY) return;
+async function backfillSome(env, maxCalls=20){
+  if(!env.YT_API_KEY) return;
 
   const rows = await env.DB.prepare(`
     SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token
     FROM channel_backfill cb
     JOIN channels c ON c.id = cb.channel_int
-    WHERE cb.done = 0 AND c.is_active = 1
+    WHERE cb.done=0 AND c.is_active=1
     ORDER BY cb.channel_int ASC
     LIMIT ?
   `).bind(maxCalls).all();
 
-  for (const r of (rows?.results || [])) {
+   for(const r of (rows?.results || [])){
     const playlistId = r.uploads_playlist_id;
 
-    if (!playlistId) {
+    if(!playlistId){
       await env.DB.prepare(`
         UPDATE channel_backfill
-        SET done = 1, updated_at = ?
-        WHERE channel_int = ?
+        SET done=1, updated_at=?
+        WHERE channel_int=?
       `).bind(nowSec(), r.channel_int).run();
       continue;
     }
 
     try {
       const u = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
-      u.searchParams.set("part", "snippet,contentDetails");
+      u.searchParams.set("part","snippet,contentDetails");
       u.searchParams.set("playlistId", playlistId);
-      u.searchParams.set("maxResults", "50");
-      if (r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
+      u.searchParams.set("maxResults","50");
+      if(r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
       u.searchParams.set("key", env.YT_API_KEY);
 
       const data = await ytJson(u.toString());
       const items = data?.items || [];
-      const metaMap = await fetchVideoMeta(
-        env,
-        items.map((it) => it?.contentDetails?.videoId).filter(Boolean)
-      );
+      const metaMap = await fetchVideoMeta(env, items.map(it => it?.contentDetails?.videoId).filter(Boolean));
 
       const now = nowSec();
-      let importedOk = 0;
-      let failedCount = 0;
+      const stmts = [];
 
-      for (const it of items) {
+      for(const it of items){
         const vid = it?.contentDetails?.videoId || null;
-        if (!vid) continue;
+        if(!vid) continue;
 
         const sn = it?.snippet || {};
-        const title = safeVideoTitle(sn?.title);
+        const title = (sn?.title || "").slice(0,200);
         const published_at = toUnixSeconds(sn?.publishedAt || null) ?? 0;
         const meta = metaMap.get(vid) || {};
         const video_kind = meta.video_kind ?? null;
         const duration_sec = meta.duration_sec ?? null;
 
-        try {
-          await env.DB.prepare(`
-            INSERT INTO videos(video_id, channel_int, title, published_at, video_kind, duration_sec, updated_at)
-            VALUES(?,?,?,?,?,?,?)
-            ON CONFLICT(video_id) DO UPDATE SET
-              title = excluded.title,
-              published_at = CASE
-                WHEN excluded.published_at > 0 THEN excluded.published_at
-                ELSE videos.published_at
-              END,
-              video_kind = CASE
-                WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind
-                ELSE videos.video_kind
-              END,
-              duration_sec = CASE
-                WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec
-                ELSE videos.duration_sec
-              END,
-              updated_at = excluded.updated_at
-            WHERE
-              videos.title IS NOT excluded.title
-              OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at, 0) != COALESCE(excluded.published_at, 0))
-              OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind, '') != excluded.video_kind)
-              OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec, -1) != excluded.duration_sec)
-          `).bind(
-            vid,
-            r.channel_int,
-            title,
-            published_at,
-            video_kind,
-            duration_sec,
-            now
-          ).run();
-
-          importedOk++;
-        } catch (e) {
-          failedCount++;
-          console.log(
-            `backfillSome item skip channel_int=${r.channel_int} playlistId=${playlistId} video_id=${vid}`,
-            e
-          );
-        }
+        stmts.push(env.DB.prepare(`
+          INSERT INTO videos(video_id, channel_int, title, published_at, video_kind, duration_sec, updated_at)
+          VALUES(?,?,?,?,?,?,?)
+          ON CONFLICT(video_id) DO UPDATE SET
+            title=excluded.title,
+            published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
+            video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
+            duration_sec=CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
+            updated_at=excluded.updated_at
+          WHERE
+            videos.title IS NOT excluded.title
+            OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
+            OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind,'') != excluded.video_kind)
+            OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec,-1) != excluded.duration_sec)
+        `).bind(vid, r.channel_int, title, published_at, video_kind, duration_sec, now));
       }
+
+      if(stmts.length) await env.DB.batch(stmts);
 
       const next = data?.nextPageToken || null;
       const done = next ? 0 : 1;
 
       await env.DB.prepare(`
         UPDATE channel_backfill
-        SET next_page_token = ?, done = ?,
+        SET next_page_token=?, done=?,
             imported_count = imported_count + ?,
-            updated_at = ?
-        WHERE channel_int = ?
-      `).bind(next, done, importedOk, nowSec(), r.channel_int).run();
-
-      if (failedCount > 0) {
-        console.log(
-          `backfillSome page partial channel_int=${r.channel_int} playlistId=${playlistId} imported=${importedOk} failed=${failedCount} next=${next || ""}`
-        );
-      }
+            updated_at=?
+        WHERE channel_int=?
+      `).bind(next, done, items.length, nowSec(), r.channel_int).run();
     } catch (e) {
-      if (isPlaylistNotFoundError(e)) {
+      if(isPlaylistNotFoundError(e)){
         console.log(`backfillSome skip invalid playlistId=${playlistId} channel_int=${r.channel_int}`);
 
         await env.DB.prepare(`
           UPDATE channel_backfill
-          SET done = 1, next_page_token = NULL, updated_at = ?
-          WHERE channel_int = ?
+          SET done=1, next_page_token=NULL, updated_at=?
+          WHERE channel_int=?
         `).bind(nowSec(), r.channel_int).run();
 
         continue;
@@ -457,7 +403,7 @@ async function catchUpFeeds(env, maxChannels=5){
 
     if(feed.ok){
       const xml = await feed.text();
-      const entries = extractEntries(xml).slice(0, 10);
+      const entries = extractEntries(xml);
 
       if(entries.length){
         const now = nowSec();
@@ -584,7 +530,7 @@ async function refreshPlaylistsMonthly(env, perRun=5, maxPages=10){
       const u = new URL("https://www.googleapis.com/youtube/v3/playlists");
       u.searchParams.set("part","snippet,contentDetails");
       u.searchParams.set("channelId", ch.channel_id);
-      u.searchParams.set("maxResults","10");
+      u.searchParams.set("maxResults","50");
       if(pageToken) u.searchParams.set("pageToken", pageToken);
       u.searchParams.set("key", env.YT_API_KEY);
 
@@ -635,240 +581,42 @@ async function refreshPlaylistsMonthly(env, perRun=5, maxPages=10){
   await setState(env, "pl_cursor", String(last));
 }
 
-
-
-async function runCron(env, opts = {}) {
-  const runtimeEnv = { ...env, DB: createDB(env) };
-  const started = nowSec();
-  await setState(runtimeEnv, "cron_last_run", String(started));
-
-  const feedLimit = Number.isFinite(opts.feedLimit) ? opts.feedLimit : 1;
-  const backfillLimit = Number.isFinite(opts.backfillLimit) ? opts.backfillLimit : 1;
-  const renewLimit = Number.isFinite(opts.renewLimit) ? opts.renewLimit : 1;
-  const playlistChannels = Number.isFinite(opts.playlistChannels) ? opts.playlistChannels : 1;
-  const playlistPages = Number.isFinite(opts.playlistPages) ? opts.playlistPages : 1;
-
-  let lastErr = "";
-  const steps = {};
-
-  try {
-    await catchUpFeeds(runtimeEnv, feedLimit);
-    steps.catchUpFeeds = { ok: true, limit: feedLimit };
-  }
-  catch (e) {
-    lastErr = `catchUpFeeds: ${e?.stack || e}`;
-    steps.catchUpFeeds = { ok: false, limit: feedLimit, error: String(e?.message || e) };
-    console.log(`catchUpFeeds error`, e);
-  }
-
-  try {
-    await backfillSome(runtimeEnv, backfillLimit);
-    steps.backfillSome = { ok: true, limit: backfillLimit };
-  }
-  catch (e) {
-    if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
-    steps.backfillSome = { ok: false, limit: backfillLimit, error: String(e?.message || e) };
-    console.log(`backfillSome error`, e);
-  }
-
-  try {
-    await renewNeeded(runtimeEnv, renewLimit, 2 * 24 * 3600);
-    steps.renewNeeded = { ok: true, limit: renewLimit };
-  }
-  catch (e) {
-    if (!lastErr) lastErr = `renewNeeded: ${e?.stack || e}`;
-    steps.renewNeeded = { ok: false, limit: renewLimit, error: String(e?.message || e) };
-    console.log(`renewNeeded error`, e);
-  }
-
-  try {
-    await refreshPlaylistsMonthly(runtimeEnv, playlistChannels, playlistPages);
-    steps.refreshPlaylistsMonthly = { ok: true, channels: playlistChannels, pages: playlistPages };
-  }
-  catch (e) {
-    if (!lastErr) lastErr = `refreshPlaylistsMonthly: ${e?.stack || e}`;
-    steps.refreshPlaylistsMonthly = { ok: false, channels: playlistChannels, pages: playlistPages, error: String(e?.message || e) };
-    console.log(`refreshPlaylistsMonthly error`, e);
-  }
-
-  await setState(runtimeEnv, "cron_last_error", lastErr);
-  if (!lastErr) {
-    await setState(runtimeEnv, "cron_last_ok", String(nowSec()));
-  }
-
-  const cron_last_run = await getState(runtimeEnv, "cron_last_run", "");
-  const cron_last_ok = await getState(runtimeEnv, "cron_last_ok", "");
-  const cron_last_error = await getState(runtimeEnv, "cron_last_error", "");
-
-  return {
-    ok: !lastErr,
-    cron_last_run,
-    cron_last_ok,
-    cron_last_error,
-    steps,
-    limits: {
-      feedLimit,
-      backfillLimit,
-      renewLimit,
-      playlistChannels,
-      playlistPages,
-    },
-  };
-}
-
-function getBasicAuthCredentials(request) {
-  const auth = request.headers.get("authorization") || "";
-  if (!auth.startsWith("Basic ")) return null;
-
-  try {
-    const decoded = atob(auth.slice(6));
-    const idx = decoded.indexOf(":");
-    if (idx === -1) return null;
-    return {
-      user: decoded.slice(0, idx),
-      pass: decoded.slice(idx + 1),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function requireOptionalBasicAuth(request, env) {
-  if (!env.ADMIN_BASIC_USER || !env.ADMIN_BASIC_PASS) {
-    return null;
-  }
-
-  const creds = getBasicAuthCredentials(request);
-  if (creds?.user === env.ADMIN_BASIC_USER && creds?.pass === env.ADMIN_BASIC_PASS) {
-    return null;
-  }
-
-  return new Response("Unauthorized", {
-    status: 401,
-    headers: {
-      "WWW-Authenticate": 'Basic realm="youtube3-cron"',
-      "content-type": "text/plain; charset=utf-8",
-    },
-  });
-}
-
-function toLocalDisplay(unixSec) {
-  if (!unixSec) return "—";
-  const n = Number(unixSec);
-  if (!Number.isFinite(n) || n <= 0) return "—";
-  return new Date(n * 1000).toLocaleString("he-IL");
-}
-
-async function getStatus(env) {
-  const runtimeEnv = { ...env, DB: createDB(env) };
-  return {
-    ok: true,
-    db: true,
-    cron_last_run: await getState(runtimeEnv, "cron_last_run", ""),
-    cron_last_ok: await getState(runtimeEnv, "cron_last_ok", ""),
-    cron_last_error: await getState(runtimeEnv, "cron_last_error", ""),
-  };
-}
-
-function renderHome(status) {
-  const html = `<!doctype html>
-<html lang="he" dir="rtl">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>youtube3-cron</title>
-  <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Arial,sans-serif;background:#f6f7fb;color:#111;margin:0;padding:24px}
-    .wrap{max-width:780px;margin:0 auto}
-    .card{background:#fff;border:1px solid #e5e7eb;border-radius:16px;padding:20px;box-shadow:0 4px 18px rgba(0,0,0,.06)}
-    h1{margin:0 0 12px;font-size:28px}
-    p{margin:8px 0}
-    .grid{display:grid;grid-template-columns:180px 1fr;gap:10px 14px;margin:18px 0}
-    .key{color:#555}
-    .actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px}
-    button,a{appearance:none;border:0;border-radius:12px;padding:12px 16px;font-size:16px;cursor:pointer;text-decoration:none}
-    button{background:#111;color:#fff}
-    a{background:#eef2ff;color:#1d4ed8}
-    code{background:#f3f4f6;padding:2px 6px;border-radius:8px}
-    .ok{color:#166534}
-    .bad{color:#b91c1c;white-space:pre-wrap;word-break:break-word}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <h1>youtube3-cron</h1>
-      <p>דף בקרה לוורקר הקרון.</p>
-      <div class="grid">
-        <div class="key">DB</div><div class="${status.db ? "ok" : "bad"}">${status.db ? "מחובר" : "שגיאה"}</div>
-        <div class="key">ריצה אחרונה</div><div>${toLocalDisplay(status.cron_last_run)}</div>
-        <div class="key">הצלחה אחרונה</div><div>${toLocalDisplay(status.cron_last_ok)}</div>
-        <div class="key">שגיאה אחרונה</div><div class="${status.cron_last_error ? "bad" : "ok"}">${status.cron_last_error || "אין"}</div>
-      </div>
-      <div class="actions">
-        <form method="post" action="/run-now">
-          <button type="submit">הפעל עכשיו ידנית (קל)</button>
-        </form>
-        <a href="/health">JSON מצב</a>
-      </div>
-      <p style="margin-top:18px">ההרצה הידנית מפעילה מצב קל כדי לא ליפול על מגבלת subrequests.</p>
-      <p>אם הגדרת <code>ADMIN_BASIC_USER</code> ו־<code>ADMIN_BASIC_PASS</code> בוורקר, הדף הזה יהיה מוגן בסיסמה.</p>
-    </div>
-  </div>
-</body>
-</html>`;
-  return new Response(html, {
-    headers: { "content-type": "text/html; charset=utf-8" },
-  });
-}
-
 export default {
-  async fetch(request, env, ctx) {
-    const authResponse = requireOptionalBasicAuth(request, env);
-    if (authResponse) return authResponse;
+  async scheduled(event, env, ctx){
+    env.DB = createDB(env);
 
-    const url = new URL(request.url);
+    ctx.waitUntil((async ()=>{
+      const started = nowSec();
+      await setState(env, "cron_last_run", String(started));
 
-    try {
-      if (request.method === "GET" && url.pathname === "/health") {
-        const status = await getStatus(env);
-        return Response.json(status);
+      let lastErr = "";
+
+      try { await catchUpFeeds(env, 5); }
+      catch (e) {
+        lastErr = `catchUpFeeds: ${e?.stack || e}`;
+        console.log(`catchUpFeeds error`, e);
       }
 
-      if (request.method === "POST" && url.pathname === "/run-now") {
-        const result = await runCron(env, { feedLimit: 1, backfillLimit: 1, renewLimit: 1, playlistChannels: 1, playlistPages: 1 });
-        return Response.json({
-          ok: result.ok,
-          message: result.ok ? "manual run finished" : "manual run finished with errors",
-          ...result,
-        });
+      try { await backfillSome(env, 3); }
+      catch (e) {
+        if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
+        console.log(lastErr);
       }
 
-      if (request.method === "GET" && url.pathname === "/run-now") {
-        const result = await runCron(env, { feedLimit: 1, backfillLimit: 1, renewLimit: 1, playlistChannels: 1, playlistPages: 1 });
-        return Response.json({
-          ok: result.ok,
-          message: result.ok ? "manual run finished" : "manual run finished with errors",
-          ...result,
-        });
+      try { await renewNeeded(env, 2, 2*24*3600); }
+      catch (e) {
+        if (!lastErr) lastErr = `renewNeeded: ${e?.stack || e}`;
+        console.log(`renewNeeded error`, e);
       }
 
-      if (request.method === "GET" && url.pathname === "/") {
-        const status = await getStatus(env);
-        return renderHome(status);
+      try { await refreshPlaylistsMonthly(env, 1, 2); }
+      catch (e) {
+        if (!lastErr) lastErr = `refreshPlaylistsMonthly: ${e?.stack || e}`;
+        console.log(`refreshPlaylistsMonthly error`, e);
       }
 
-      return new Response("Not found", { status: 404 });
-    } catch (error) {
-      return Response.json({
-        ok: false,
-        error: String(error?.stack || error || "unknown error"),
-      }, { status: 500 });
-    }
-  },
-
-  async scheduled(event, env, ctx) {
-    console.log(`scheduled fired: ${event.cron || "unknown"}`);
-    ctx.waitUntil(runCron(env, { feedLimit: 1, backfillLimit: 1, renewLimit: 1, playlistChannels: 1, playlistPages: 1 }));
+      await setState(env, "cron_last_error", lastErr);
+      if (!lastErr) await setState(env, "cron_last_ok", String(nowSec()));
+    })());
   }
 };
