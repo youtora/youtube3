@@ -609,28 +609,10 @@ export default {
 
       let lastErr = "";
 
-      try { await catchUpFeeds(env, 5); }
-      catch (e) {
-        lastErr = `catchUpFeeds: ${e?.stack || e}`;
-        console.log(`catchUpFeeds error`, e);
-      }
-
-      try { await backfillSome(env, 3); }
+      try { await backfillSome(env, 1); }
       catch (e) {
         if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
-        console.log(lastErr);
-      }
-
-      try { await renewNeeded(env, 2, 2*24*3600); }
-      catch (e) {
-        if (!lastErr) lastErr = `renewNeeded: ${e?.stack || e}`;
-        console.log(`renewNeeded error`, e);
-      }
-
-      try { await refreshPlaylistsMonthly(env, 1, 2); }
-      catch (e) {
-        if (!lastErr) lastErr = `refreshPlaylistsMonthly: ${e?.stack || e}`;
-        console.log(`refreshPlaylistsMonthly error`, e);
+        console.log(`backfillSome error`, e);
       }
 
       await setState(env, "cron_last_error", lastErr);
