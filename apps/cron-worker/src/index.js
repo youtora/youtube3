@@ -481,15 +481,59 @@ function isPlaylistNotFoundError(err){
   return msg.includes("YT 404") && msg.includes("playlistId");
 }
 function videoUpsertAndMetaStmts(env, rows, ts){
-  const ids = rows.map(r => r.vid).filter(Boolean);
+  // הגנה כפולה: שום statement לא ינסה להכניס videos.video_id ריק/NULL.
+  // זה מטפל בפריטי playlist מחוקים/פרטיים וגם בכל שינוי פורמט ש-YouTube מחזיר.
+  const cleanRows = [];
+  const seen = new Set();
+
+  for (const raw of (rows || [])) {
+    const vid = String(
+      raw?.vid ||
+      raw?.video_id ||
+      raw?.videoId ||
+      ""
+    ).trim();
+
+    if (!vid || seen.has(vid)) {
+      if (!vid) {
+        console.log("videoUpsertAndMetaStmts skip row without video id", JSON.stringify(raw || {}).slice(0, 500));
+      }
+      continue;
+    }
+
+    seen.add(vid);
+
+    cleanRows.push({
+      ...raw,
+      vid,
+      channel_int: raw?.channel_int,
+      title: String(raw?.title || "").slice(0, 200) || "[untitled]",
+      published_at: Number(raw?.published_at || 0) || 0
+    });
+  }
+
+  const ids = cleanRows.map(r => r.vid).filter(Boolean);
+
+  if (!ids.length) {
+    return Promise.resolve({
+      stmts: [],
+      metaCount: 0
+    });
+  }
+
   return fetchVideoMeta(env, ids).then(metaMap => {
     const stmts = [];
 
-    for(const row of rows){
-      const meta = metaMap.get(row.vid) || null;
+    for(const row of cleanRows){
+      const vid = String(row.vid || "").trim();
+      if (!vid) continue;
+
+      const meta = metaMap.get(vid) || null;
       const title = (meta?.title || row.title || "[untitled]").slice(0, 200);
       const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
 
+      // משתמשים ב-INSERT ... SELECT ... WHERE כדי שגם אם בעתיד vid יהיה ריק,
+      // SQLite לא ינסה להכניס NULL לעמודת videos.video_id.
       stmts.push(env.DB.prepare(`
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
@@ -497,7 +541,8 @@ function videoUpsertAndMetaStmts(env, rows, ts){
           view_count, like_count, comment_count, stats_fetched_at,
           updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        WHERE ? IS NOT NULL AND ? <> ''
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int      = excluded.channel_int,
           title            = excluded.title,
@@ -523,7 +568,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
           OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count,-1) != excluded.comment_count)
           OR (excluded.stats_fetched_at IS NOT NULL AND COALESCE(videos.stats_fetched_at,0) != excluded.stats_fetched_at)
       `).bind(
-        row.vid,
+        vid,
         row.channel_int,
         title,
         publishedAt,
@@ -533,11 +578,13 @@ function videoUpsertAndMetaStmts(env, rows, ts){
         meta?.like_count ?? null,
         meta?.comment_count ?? null,
         meta ? ts : null,
-        ts
+        ts,
+        vid,
+        vid
       ));
 
       if(meta){
-        stmts.push(...videoDetailsStmts(env, row.vid, meta, ts));
+        stmts.push(...videoDetailsStmts(env, vid, meta, ts));
       }
     }
 
@@ -853,6 +900,7 @@ async function refreshPlaylistsMonthly(env, perRun=5, maxPages=10){
 export default {
   async scheduled(event, env, ctx){
     env.DB = createDB(env);
+    console.log("youtube4-cron v6 metadata-safe 2026-04-28");
 
     ctx.waitUntil((async ()=>{
       const started = nowSec();
