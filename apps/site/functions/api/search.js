@@ -1,8 +1,7 @@
 import { getDB } from "../_db.js";
-
 // functions/api/search.js
-// FTS5 search on titles only (video_fts) + cursor pagination by rowid
-// Always returns 50 results per request (no max limit param).
+// Default: fast title-only FTS over video_fts.
+// Optional future mode: ?scope=all searches title + description/tags/hashtags.
 
 function cleanQuery(q) {
   const s = (q || "").trim();
@@ -21,12 +20,13 @@ function toFtsMatch(cleaned) {
 }
 
 export async function onRequest({ env, request }) {
-  const DB = getDB(env);
+  env.DB = getDB(env);
   const url = new URL(request.url);
 
   const qRaw = url.searchParams.get("q") || "";
   const cleaned = cleanQuery(qRaw);
   const match = toFtsMatch(cleaned);
+  const scope = (url.searchParams.get("scope") || "title").trim().toLowerCase() === "all" ? "all" : "title";
 
   const limit = 50;
 
@@ -35,71 +35,161 @@ export async function onRequest({ env, request }) {
 
   if (!match) {
     return Response.json(
-      { results: [], next_cursor: null },
+      { results: [], next_cursor: null, scope },
       { headers: { "cache-control": "public, max-age=30" } }
     );
   }
 
-  const fts = (Number.isFinite(cursor) && cursor > 0)
-    ? await DB.prepare(`
-        SELECT rowid
-        FROM video_fts
-        WHERE video_fts MATCH ?
-          AND rowid < ?
-        ORDER BY rowid DESC
-        LIMIT ?
-      `).bind(match, cursor, limit).all()
-    : await DB.prepare(`
-        SELECT rowid
-        FROM video_fts
-        WHERE video_fts MATCH ?
-        ORDER BY rowid DESC
-        LIMIT ?
-      `).bind(match, limit).all();
+  let vids;
 
-  const ids = (fts.results || []).map(r => r.rowid);
-  if (!ids.length) {
-    return Response.json(
-      { results: [], next_cursor: null },
-      { headers: { "cache-control": "public, max-age=30" } }
-    );
+  if (scope === "all") {
+    vids = (Number.isFinite(cursor) && cursor > 0)
+      ? await env.DB.prepare(`
+          WITH hits AS (
+            SELECT rowid AS video_rowid
+            FROM video_fts
+            WHERE video_fts MATCH ?
+
+            UNION
+
+            SELECT v.id AS video_rowid
+            FROM video_details_fts
+            JOIN videos v
+              ON v.video_id = video_details_fts.video_id
+            WHERE video_details_fts MATCH ?
+          )
+          SELECT
+            v.id,
+            v.video_id,
+            v.title,
+            v.published_at,
+            v.video_kind,
+            v.duration_sec,
+            v.view_count,
+            v.like_count,
+            v.comment_count,
+            c.channel_id,
+            c.title AS channel_title,
+            c.thumbnail_url AS channel_thumbnail_url
+          FROM hits h
+          JOIN videos AS v
+            ON v.id = h.video_rowid
+          JOIN channels AS c
+            ON c.id = v.channel_int
+          WHERE v.id < ?
+          ORDER BY v.id DESC
+          LIMIT ?
+        `).bind(match, match, cursor, limit).all()
+      : await env.DB.prepare(`
+          WITH hits AS (
+            SELECT rowid AS video_rowid
+            FROM video_fts
+            WHERE video_fts MATCH ?
+
+            UNION
+
+            SELECT v.id AS video_rowid
+            FROM video_details_fts
+            JOIN videos v
+              ON v.video_id = video_details_fts.video_id
+            WHERE video_details_fts MATCH ?
+          )
+          SELECT
+            v.id,
+            v.video_id,
+            v.title,
+            v.published_at,
+            v.video_kind,
+            v.duration_sec,
+            v.view_count,
+            v.like_count,
+            v.comment_count,
+            c.channel_id,
+            c.title AS channel_title,
+            c.thumbnail_url AS channel_thumbnail_url
+          FROM hits h
+          JOIN videos AS v
+            ON v.id = h.video_rowid
+          JOIN channels AS c
+            ON c.id = v.channel_int
+          ORDER BY v.id DESC
+          LIMIT ?
+        `).bind(match, match, limit).all();
+  } else {
+    vids = (Number.isFinite(cursor) && cursor > 0)
+      ? await env.DB.prepare(`
+          SELECT
+            v.id,
+            v.video_id,
+            v.title,
+            v.published_at,
+            v.video_kind,
+            v.duration_sec,
+            v.view_count,
+            v.like_count,
+            v.comment_count,
+            c.channel_id,
+            c.title AS channel_title,
+            c.thumbnail_url AS channel_thumbnail_url
+          FROM video_fts f
+          JOIN videos AS v
+            ON v.id = f.rowid
+          JOIN channels AS c
+            ON c.id = v.channel_int
+          WHERE video_fts MATCH ?
+            AND f.rowid < ?
+          ORDER BY f.rowid DESC
+          LIMIT ?
+        `).bind(match, cursor, limit).all()
+      : await env.DB.prepare(`
+          SELECT
+            v.id,
+            v.video_id,
+            v.title,
+            v.published_at,
+            v.video_kind,
+            v.duration_sec,
+            v.view_count,
+            v.like_count,
+            v.comment_count,
+            c.channel_id,
+            c.title AS channel_title,
+            c.thumbnail_url AS channel_thumbnail_url
+          FROM video_fts f
+          JOIN videos AS v
+            ON v.id = f.rowid
+          JOIN channels AS c
+            ON c.id = v.channel_int
+          WHERE video_fts MATCH ?
+          ORDER BY f.rowid DESC
+          LIMIT ?
+        `).bind(match, limit).all();
   }
 
-  const placeholders = ids.map(() => "?").join(",");
-  const vids = await DB.prepare(`
-    SELECT
-      v.id,
-      v.video_id,
-      v.title,
-      v.published_at,
-      v.video_kind,
-      v.duration_sec,
-      c.channel_id,
-      c.title AS channel_title,
-      c.thumbnail_url AS channel_thumbnail_url
-    FROM videos AS v
-    JOIN channels AS c
-      ON c.id = v.channel_int
-    WHERE v.id IN (${placeholders})
-    ORDER BY v.id DESC
-  `).bind(...ids).all();
-
-  const results = (vids.results || []).map(v => ({
+  const rows = vids.results || [];
+  const results = rows.map(v => ({
     video_id: v.video_id,
     title: v.title,
     published_at: v.published_at,
     video_kind: v.video_kind || "",
     duration_sec: v.duration_sec ?? null,
+    view_count: v.view_count ?? null,
+    like_count: v.like_count ?? null,
+    comment_count: v.comment_count ?? null,
     channel_id: v.channel_id || null,
     channel_title: v.channel_title || null,
     channel_thumbnail_url: v.channel_thumbnail_url || null,
     cursor: String(v.id)
   }));
 
-  const next_cursor = String(ids[ids.length - 1]);
+  const last = rows[rows.length - 1];
+  const next_cursor =
+    rows.length >= limit && last
+      ? String(last.id)
+      : null;
 
   return Response.json(
-    { results, next_cursor },
+    { results, next_cursor, scope },
     { headers: { "cache-control": "public, max-age=30" } }
   );
 }

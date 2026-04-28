@@ -231,36 +231,218 @@ function extractDurationSec(it){
   return Number.isFinite(sec) && sec > 0 ? sec : null;
 }
 
-function buildVideoMeta(it){
-  return {
-    video_kind: classifyVideoItem(it),
-    duration_sec: extractDurationSec(it)
-  };
+function toIntOrNull(value){
+  if(value === undefined || value === null || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
 }
 
-async function fetchVideoMeta(env, ids){
-  const out = new Map();
-  const uniq = [...new Set((ids || []).filter(Boolean))];
-  if(!env.YT_API_KEY || !uniq.length) return out;
+function cleanText(value, maxLen){
+  const s = String(value || "").replace(/\u0000/g, "").trim();
+  return s ? s.slice(0, maxLen) : "";
+}
 
-  for(let i=0;i<uniq.length;i+=50){
-    const chunk = uniq.slice(i, i+50);
-    const u = new URL("https://www.googleapis.com/youtube/v3/videos");
-    u.searchParams.set("part", "contentDetails,liveStreamingDetails,player");
-    u.searchParams.set("id", chunk.join(","));
-    u.searchParams.set("maxResults", String(chunk.length));
-    u.searchParams.set("maxWidth", "8192");
-    u.searchParams.set("maxHeight", "8192");
-    u.searchParams.set("key", env.YT_API_KEY);
+function normalizeTagKey(value){
+  return String(value || "")
+    .trim()
+    .replace(/^#+/, "")
+    .trim()
+    .replace(/[“”״"]/g, '"')
+    .replace(/[‘’׳']/g, "'")
+    .toLocaleLowerCase();
+}
 
-    const data = await ytJson(u.toString());
-    for(const it of (data?.items || [])){
-      if(it?.id) out.set(it.id, buildVideoMeta(it));
+function cleanTags(tags){
+  if(!Array.isArray(tags)) return [];
+  const out = [];
+  const seen = new Set();
+
+  for(const raw of tags){
+    const tag = cleanText(raw, 120);
+    if(!tag) continue;
+
+    const key = normalizeTagKey(tag);
+    if(!key || seen.has(key)) continue;
+
+    seen.add(key);
+    out.push(tag);
+    if(out.length >= 40) break;
+  }
+
+  return out;
+}
+
+function extractHashtags(...texts){
+  const out = [];
+  const seen = new Set();
+
+  for(const text of texts){
+    const s = String(text || "");
+    const re = /(^|[^\p{L}\p{N}_-])#((?:[\p{L}\p{N}_-]|['"׳״’](?=[\p{L}\p{N}_-])){2,80})/gu;
+    let m;
+
+    while((m = re.exec(s))){
+      const tag = cleanText(m[2], 80);
+      if(!tag) continue;
+
+      const key = normalizeTagKey(tag);
+      if(!key || seen.has(key)) continue;
+
+      seen.add(key);
+      out.push(tag);
+      if(out.length >= 30) return out;
     }
   }
 
   return out;
 }
+
+function buildVideoMeta(it){
+  const sn = it?.snippet || {};
+  const st = it?.statistics || {};
+  const description = cleanText(sn.description || "", 6000);
+  const tags = cleanTags(sn.tags || []);
+  const hashtags = extractHashtags(sn.title || "", description);
+
+  return {
+    title: cleanText(sn.title || "", 200),
+    published_at_iso: sn.publishedAt || "",
+    channel_id: sn.channelId || "",
+    video_kind: classifyVideoItem(it),
+    duration_sec: extractDurationSec(it),
+    view_count: toIntOrNull(st.viewCount),
+    like_count: toIntOrNull(st.likeCount),
+    comment_count: toIntOrNull(st.commentCount),
+    description,
+    tags,
+    hashtags,
+    category_id: sn.categoryId || "",
+    default_language: sn.defaultLanguage || "",
+    default_audio_language: sn.defaultAudioLanguage || "",
+    live_broadcast_content: sn.liveBroadcastContent || ""
+  };
+}
+
+function uniqueIndexedTags(tags, type, maxLen){
+  const out = [];
+  const seen = new Set();
+
+  for(const raw of tags || []){
+    const value = cleanText(raw, maxLen);
+    const norm = normalizeTagKey(value);
+    if(!value || !norm || seen.has(norm)) continue;
+
+    seen.add(norm);
+    out.push({ type, value, norm });
+  }
+
+  return out;
+}
+
+function videoTagIndexStmts(env, videoId, tags, hashtags){
+  const items = [
+    ...uniqueIndexedTags(tags, "tag", 120),
+    ...uniqueIndexedTags(hashtags, "hashtag", 80)
+  ];
+
+  const stmts = [
+    env.DB.prepare(`DELETE FROM video_tags WHERE video_id = ?`).bind(videoId)
+  ];
+
+  for(let i = 0; i < items.length; i += 25){
+    const chunk = items.slice(i, i + 25);
+    if(!chunk.length) continue;
+
+    const valuesSql = chunk.map(() => "(?, ?, ?)").join(", ");
+    const binds = [];
+
+    for(const item of chunk){
+      binds.push(item.type, item.value, item.norm);
+    }
+
+    binds.push(videoId, videoId);
+
+    stmts.push(env.DB.prepare(`
+      WITH input(tag_type, tag_value, tag_norm) AS (
+        VALUES ${valuesSql}
+      )
+      INSERT OR IGNORE INTO video_tags(video_id, tag_type, tag_value, tag_norm, video_rowid)
+      SELECT ?, input.tag_type, input.tag_value, input.tag_norm, v.id
+      FROM input
+      JOIN videos AS v
+        ON v.video_id = ?
+    `).bind(...binds));
+  }
+
+  return stmts;
+}
+
+function videoDetailsStmts(env, videoId, meta, ts){
+  const tags = Array.isArray(meta?.tags) ? meta.tags : [];
+  const hashtags = Array.isArray(meta?.hashtags) ? meta.hashtags : [];
+  const tagsJson = JSON.stringify(tags);
+  const hashtagsJson = JSON.stringify(hashtags);
+  const description = meta?.description || "";
+  const tagsText = tags.join(" ");
+  const hashtagsText = hashtags.map(t => `#${t}`).join(" ");
+
+  return [
+    env.DB.prepare(`
+      INSERT INTO video_details(
+        video_id, description, tags_json, hashtags_json,
+        category_id, default_language, default_audio_language, live_broadcast_content,
+        fetched_at, updated_at
+      )
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(video_id) DO UPDATE SET
+        description            = excluded.description,
+        tags_json              = excluded.tags_json,
+        hashtags_json          = excluded.hashtags_json,
+        category_id            = excluded.category_id,
+        default_language       = excluded.default_language,
+        default_audio_language = excluded.default_audio_language,
+        live_broadcast_content = excluded.live_broadcast_content,
+        fetched_at             = excluded.fetched_at,
+        updated_at             = excluded.updated_at
+      WHERE
+        video_details.description IS NOT excluded.description
+        OR video_details.tags_json IS NOT excluded.tags_json
+        OR video_details.hashtags_json IS NOT excluded.hashtags_json
+        OR video_details.category_id IS NOT excluded.category_id
+        OR video_details.default_language IS NOT excluded.default_language
+        OR video_details.default_audio_language IS NOT excluded.default_audio_language
+        OR video_details.live_broadcast_content IS NOT excluded.live_broadcast_content
+        OR COALESCE(video_details.fetched_at, 0) != excluded.fetched_at
+    `).bind(
+      videoId,
+      description,
+      tagsJson,
+      hashtagsJson,
+      meta?.category_id || "",
+      meta?.default_language || "",
+      meta?.default_audio_language || "",
+      meta?.live_broadcast_content || "",
+      ts,
+      ts
+    ),
+    env.DB.prepare(`DELETE FROM video_details_fts WHERE video_id = ?`).bind(videoId),
+    env.DB.prepare(`
+      INSERT INTO video_details_fts(video_id, description, tags, hashtags)
+      VALUES(?, ?, ?, ?)
+    `).bind(videoId, description, tagsText, hashtagsText),
+    ...videoTagIndexStmts(env, videoId, tags, hashtags)
+  ];
+}
+
+function parseJsonArray(value){
+  try {
+    const arr = JSON.parse(value || "[]");
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
 
 async function fetchChannelUploadsPlaylistId(env, channelId){
   const u = new URL("https://www.googleapis.com/youtube/v3/channels");
@@ -322,37 +504,62 @@ async function backfillSome(env, maxCalls=20){
         if(!vid) continue;
 
         const sn = it?.snippet || {};
-        const title = String(sn?.title || "").slice(0,200) || "[untitled]";
-        const published_at = toUnixSeconds(sn?.publishedAt || null) ?? 0;
         const meta = metaMap.get(vid) || {};
+        const title = String(meta.title || sn?.title || "").slice(0,200) || "[untitled]";
+        const published_at = toUnixSeconds(meta.published_at_iso || sn?.publishedAt || null) ?? 0;
         const video_kind = meta.video_kind ?? null;
         const duration_sec = meta.duration_sec ?? null;
+        const view_count = meta.view_count ?? null;
+        const like_count = meta.like_count ?? null;
+        const comment_count = meta.comment_count ?? null;
+        const stats_fetched_at = metaMap.has(vid) ? now : null;
 
         stmts.push(env.DB.prepare(`
-          INSERT INTO videos(video_id, channel_int, title, published_at, video_kind, duration_sec, updated_at)
-          VALUES(?,?,?,?,?,?,?)
+          INSERT INTO videos(
+            video_id, channel_int, title, published_at,
+            video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
+            updated_at
+          )
+          VALUES(?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(video_id) DO UPDATE SET
             title=excluded.title,
             published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
             video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
             duration_sec=CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
+            view_count=CASE WHEN excluded.view_count IS NOT NULL THEN excluded.view_count ELSE videos.view_count END,
+            like_count=CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
+            comment_count=CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
+            stats_fetched_at=CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
             updated_at=excluded.updated_at
           WHERE
             videos.title IS NOT excluded.title
             OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
             OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind,'') != excluded.video_kind)
             OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec,-1) != COALESCE(excluded.duration_sec,-1))
-        `).bind(vid, r.channel_int, title, published_at, video_kind, duration_sec, now));
-
+            OR (excluded.view_count IS NOT NULL AND COALESCE(videos.view_count,-1) != excluded.view_count)
+            OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count,-1) != excluded.like_count)
+            OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count,-1) != excluded.comment_count)
+        `).bind(
+          vid, r.channel_int, title, published_at,
+          video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
+          now
+        ));
         stmtVideoIds.push(vid);
+
+        if(metaMap.has(vid)){
+          for(const stmt of videoDetailsStmts(env, vid, meta, now)){
+            stmts.push(stmt);
+            stmtVideoIds.push(vid);
+          }
+        }
       }
 
-      let importedOk = 0;
+      const importedVideos = new Set();
 
       for(let i=0; i<stmts.length; i++){
         try {
           await stmts[i].run();
-          importedOk++;
+          if (stmtVideoIds[i]) importedVideos.add(stmtVideoIds[i]);
         } catch (itemErr) {
           console.log(
             `backfillSome item skip channel_int=${r.channel_int} playlistId=${playlistId} video_id=${stmtVideoIds[i]}`,
@@ -370,7 +577,7 @@ async function backfillSome(env, maxCalls=20){
             imported_count = imported_count + ?,
             updated_at=?
         WHERE channel_int=?
-      `).bind(next, done, importedOk, nowSec(), r.channel_int).run();
+      `).bind(next, done, importedVideos.size, nowSec(), r.channel_int).run();
 
     } catch (e) {
       if(isPlaylistNotFoundError(e)){

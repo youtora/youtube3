@@ -1,5 +1,4 @@
 import { getDB } from "../_db.js";
-
 // functions/admin/renew-websub.js
 
 function unauthorized() { return new Response("unauthorized", { status: 401 }); }
@@ -32,7 +31,7 @@ async function subscribeTopic({ env, request, topic_url, channel_int }) {
 
   const last_error = res.ok ? null : `hub subscribe failed: ${res.status}`;
 
-  await DB.prepare(`
+  await env.DB.prepare(`
     INSERT INTO subscriptions(topic_url, channel_int, status, last_subscribed_at, last_error)
     VALUES(?, ?, 'pending', ?, ?)
     ON CONFLICT(topic_url) DO UPDATE SET
@@ -49,7 +48,7 @@ async function subscribeTopic({ env, request, topic_url, channel_int }) {
 }
 
 export async function onRequest({ env, request }) {
-  const DB = getDB(env);
+  env.DB = getDB(env);
   if (request.method !== "POST") return new Response("use POST", { status: 200 });
 
 
@@ -63,7 +62,7 @@ export async function onRequest({ env, request }) {
   const limit = Math.min(Math.max(parseInt(body.limit || "200", 10), 1), 2000);
   const t = nowSec();
 
-  const subs = await DB.prepare(`
+  const subs = await env.DB.prepare(`
     SELECT topic_url, channel_int, status, lease_expires_at
     FROM subscriptions
     ORDER BY COALESCE(lease_expires_at, 0) ASC

@@ -1,10 +1,9 @@
 import { getDB } from "./_db.js";
+import { parseJsonArray } from "./_shared/video-meta.js";
 
 export async function onRequest(context) {
-  const { env } = context;
-  const DB = getDB(env);
-
-  const { request } = context;
+  const { request, env } = context;
+  env.DB = getDB(env);
   const currentUrl = new URL(request.url);
   const normalizedPath = normalizePath(currentUrl.pathname);
 
@@ -13,6 +12,14 @@ export async function onRequest(context) {
   if (normalizedPath !== currentUrl.pathname && !currentUrl.pathname.includes(".")) {
     const target = new URL(currentUrl.toString());
     target.pathname = normalizedPath;
+    return Response.redirect(target.toString(), 301);
+  }
+
+  const oldHashtagMatch = normalizedPath.match(/^\/tag\/([^/]+)$/);
+  if (oldHashtagMatch && currentUrl.searchParams.get("type") === "hashtag") {
+    const target = new URL(currentUrl.toString());
+    target.pathname = `/hashtag/${oldHashtagMatch[1]}`;
+    target.searchParams.delete("type");
     return Response.redirect(target.toString(), 301);
   }
 
@@ -97,11 +104,17 @@ function rewriteIndex(response, meta) {
   const robots = meta.robots || "index,follow,max-image-preview:large";
   const ogType = meta.type || "website";
   const jsonLd = meta.jsonLd ? `<script id="structured-data" type="application/ld+json">${escJson(meta.jsonLd)}</script>` : `<script id="structured-data" type="application/ld+json"></script>`;
+  let titleWritten = false;
 
   return new HTMLRewriter()
     .on("title", {
       text(text) {
-        text.replace(title);
+        if (!titleWritten) {
+          text.replace(title);
+          titleWritten = true;
+        } else {
+          text.remove();
+        }
       },
     })
     .on('meta[name="description"]', setAttr("content", description))
@@ -120,6 +133,13 @@ function rewriteIndex(response, meta) {
     .on('script#structured-data', {
       element(el) {
         el.replace(jsonLd, { html: true });
+      },
+    })
+    .on("div#page", {
+      element(el) {
+        if (meta.pageHtml) {
+          el.setInnerContent(meta.pageHtml, { html: true });
+        }
       },
     })
     .transform(response);
@@ -293,6 +313,8 @@ function isLikelySpaRoute(path) {
     return true;
   }
 
+  if (/^\/hashtag(?:\/[^/]+)?$/.test(path)) return true;
+  if (/^\/tag(?:\/[^/]+)?$/.test(path)) return true;
   if (/^\/([A-Za-z0-9_-]{11})$/.test(path)) return true;
   if (/^\/(PL[A-Za-z0-9_-]+)$/.test(path)) return true;
   if (/^\/(UC[A-Za-z0-9_-]{10,})(?:\/(videos|shorts|live|playlists))?$/.test(path)) return true;
@@ -352,6 +374,47 @@ function buildFallbackMeta({ url, path }) {
     };
   }
 
+  const hashtagMatch = path.match(/^\/hashtag(?:\/([^/]+))?$/);
+  if (hashtagMatch) {
+    const rawTag = hashtagMatch[1] ? decodeURIComponent(hashtagMatch[1]).trim().replace(/^#+/, "") : "";
+    const display = rawTag ? `#${rawTag}` : "האשטג";
+    return {
+      origin,
+      url: url.toString(),
+      canonical: rawTag ? `${origin}/hashtag/${encodeURIComponent(rawTag)}` : `${origin}/hashtag`,
+      type: "website",
+      title: `${display} | Youtora`,
+      description: rawTag ? `כל הסרטונים עם האשטג ${display} ב־Youtora.` : "סרטונים לפי האשטגים ב־Youtora.",
+      image: `${origin}/default-og.png`,
+      robots: "index,follow,max-image-preview:large",
+    };
+  }
+
+  const tagMatch = path.match(/^\/tag(?:\/([^/]+))?$/);
+  if (tagMatch) {
+    const rawTag = tagMatch[1] ? decodeURIComponent(tagMatch[1]).trim().replace(/^#+/, "") : "";
+    const isOldHashtag = url.searchParams.get("type") === "hashtag";
+    const display = rawTag ? (isOldHashtag ? `#${rawTag}` : rawTag) : (isOldHashtag ? "האשטג" : "תגית");
+    return {
+      origin,
+      url: url.toString(),
+      canonical: rawTag
+        ? isOldHashtag
+          ? `${origin}/hashtag/${encodeURIComponent(rawTag)}`
+          : `${origin}/tag/${encodeURIComponent(rawTag)}`
+        : isOldHashtag
+          ? `${origin}/hashtag`
+          : `${origin}/tag`,
+      type: "website",
+      title: `${display} | Youtora`,
+      description: rawTag
+        ? `כל הסרטונים עם ${isOldHashtag ? "האשטג" : "תגית"} ${display} ב־Youtora.`
+        : `סרטונים לפי ${isOldHashtag ? "האשטגים" : "תגיות"} ב־Youtora.`,
+      image: `${origin}/default-og.png`,
+      robots: "index,follow,max-image-preview:large",
+    };
+  }
+
   return {
     origin,
     url: url.toString(),
@@ -389,11 +452,23 @@ async function resolveRoute({ url, env }) {
   if (mVideo) {
     const id = mVideo[1];
     const row = await firstRow(env.DB, `
-      SELECT v.video_id, v.title, v.published_at, v.duration_sec,
-             c.channel_id,
-             c.title AS channel_title
+      SELECT
+        v.video_id,
+        v.title,
+        v.published_at,
+        v.channel_int,
+        v.duration_sec,
+        v.view_count,
+        v.like_count,
+        v.comment_count,
+        c.channel_id,
+        c.title AS channel_title,
+        d.description AS video_description,
+        d.tags_json,
+        d.hashtags_json
       FROM videos v
-      LEFT JOIN channels c ON c.id = v.channel_int
+      JOIN channels c ON c.id = v.channel_int
+      LEFT JOIN video_details d ON d.video_id = v.video_id
       WHERE v.video_id = ?
       LIMIT 1
     `, [id]);
@@ -402,11 +477,27 @@ async function resolveRoute({ url, env }) {
     const videoId = String(row.video_id || "").trim();
     if (!videoId) return { found: false };
 
+    const related = await safeAll(env.DB, `
+      SELECT
+        v.video_id,
+        v.title,
+        v.published_at,
+        v.duration_sec
+      FROM videos v INDEXED BY idx_videos_channel_cover
+      WHERE v.channel_int = ?
+        AND v.video_id <> ?
+      ORDER BY v.published_at DESC, v.id DESC
+      LIMIT 12
+    `, [row.channel_int, videoId]);
+
     const title = String(row.title || videoId).trim() || videoId;
     const channelTitle = String(row.channel_title || row.channel_id || "").trim();
-    const description = channelTitle
-      ? `${title} · ${channelTitle} · צפייה בסרטון ב־Youtora`
-      : `${title} · צפייה בסרטון ב־Youtora`;
+    const rawVideoDescription = String(row.video_description || "").trim();
+    const description = rawVideoDescription
+      ? makeSeoDescription(rawVideoDescription, title, channelTitle)
+      : channelTitle
+        ? `${title} · ${channelTitle} · צפייה בסרטון ב־Youtora`
+        : `${title} · צפייה בסרטון ב־Youtora`;
     const canonical = `${origin}/${encodeURIComponent(videoId)}`;
     return {
       found: true,
@@ -415,11 +506,12 @@ async function resolveRoute({ url, env }) {
         url: url.toString(),
         canonical,
         type: "video.other",
-        title: `${title} | Youtora`,
+        title: `${stripSiteSuffix(title)} | Youtora`,
         description,
         image: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
         robots: "index,follow,max-image-preview:large",
         jsonLd: buildVideoJsonLd({ row, canonical }),
+        pageHtml: buildVideoSeoHtml({ row, canonical, related }),
       },
     };
   }
@@ -428,8 +520,7 @@ async function resolveRoute({ url, env }) {
   if (mPlaylist) {
     const playlistId = mPlaylist[1];
     const row = await firstRow(env.DB, `
-      SELECT p.playlist_id, p.title, p.thumb_video_id,
-             c.channel_id,
+      SELECT p.playlist_id, p.title, p.thumb_video_id, c.channel_id,
              c.title AS channel_title
       FROM playlists p
       LEFT JOIN channels c ON c.id = p.channel_int
@@ -571,6 +662,118 @@ function getStaticMeta({ path, url }) {
   return null;
 }
 
+function makeSeoDescription(description, title, channelTitle) {
+  const clean = cleanSeoText(description, 220)
+    .replace(/https?:\/\/\S+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const base = clean || [title, channelTitle].filter(Boolean).join(" · ");
+  return base.length > 165 ? `${base.slice(0, 162).trim()}…` : base;
+}
+
+function buildVideoSeoHtml({ row, canonical, related = [] }) {
+  const videoId = String(row?.video_id || "").trim();
+  const title = stripSiteSuffix(String(row?.title || videoId).trim() || videoId);
+  const channelId = String(row?.channel_id || "").trim();
+  const channelTitle = String(row?.channel_title || channelId || "").trim();
+  const description = cleanSeoText(row?.video_description || "", 1800);
+  const tags = [
+    ...parseJsonArray(row?.hashtags_json).map((tag) => `#${String(tag).replace(/^#+/, "")}`),
+    ...parseJsonArray(row?.tags_json).map((tag) => String(tag).replace(/^#+/, "")),
+  ].filter(Boolean).slice(0, 18);
+  const relatedItems = (related || []).filter((item) => item?.video_id).slice(0, 8);
+
+  return `
+    <article class="seoVideoPage" aria-label="פרטי הסרטון">
+      <h1>${html(title)}</h1>
+
+      <div class="seoVideoEmbed">
+        <iframe
+          src="https://www.youtube.com/embed/${encodeURIComponent(videoId)}?rel=0"
+          title="${html(title)}"
+          loading="lazy"
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          allowfullscreen></iframe>
+      </div>
+
+      <p class="seoVideoMeta">
+        ${channelId ? `<a href="/${encodeURIComponent(channelId)}/videos" data-link>${html(channelTitle || channelId)}</a>` : html(channelTitle)}
+        ${row?.published_at ? `<span>פורסם: ${html(formatHebrewDate(row.published_at))}</span>` : ""}
+        ${row?.duration_sec ? `<span>משך: ${html(formatDurationText(row.duration_sec))}</span>` : ""}
+      </p>
+
+      ${tags.length ? `<nav class="seoTags" aria-label="תגיות">${tags.map(renderSeoTag).join("")}</nav>` : ""}
+
+      ${description ? `<p class="seoDescription">${html(description)}</p>` : ""}
+
+      <p class="seoOriginalLink">
+        <a href="https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}" target="_blank" rel="nofollow noopener noreferrer">פתח את הסרטון המקורי ביוטיוב</a>
+      </p>
+
+      ${relatedItems.length ? `
+        <section class="seoRelated" aria-label="עוד סרטונים מהערוץ">
+          <h2>עוד סרטונים מהערוץ</h2>
+          <ul>
+            ${relatedItems.map((item) => `
+              <li>
+                <a href="/${encodeURIComponent(item.video_id)}" data-link>${html(stripSiteSuffix(item.title || item.video_id))}</a>
+                ${item.published_at ? `<span>${html(formatHebrewDate(item.published_at))}</span>` : ""}
+              </li>
+            `).join("")}
+          </ul>
+        </section>
+      ` : ""}
+    </article>
+  `;
+}
+
+function renderSeoTag(rawTag) {
+  const value = String(rawTag || "").trim();
+  if (!value) return "";
+
+  if (value.startsWith("#")) {
+    const clean = value.replace(/^#+/, "").trim();
+    return clean ? `<a href="/hashtag/${encodeURIComponent(clean)}" data-link>${html(`#${clean}`)}</a>` : "";
+  }
+
+  return `<a href="/tag/${encodeURIComponent(value)}" data-link>${html(value)}</a>`;
+}
+
+function cleanSeoText(value, maxLen = 1000) {
+  const clean = String(value || "")
+    .replace(/\u0000/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (!clean) return "";
+  return clean.length > maxLen ? `${clean.slice(0, Math.max(0, maxLen - 1)).trim()}…` : clean;
+}
+
+function stripSiteSuffix(value) {
+  return String(value || "").replace(/\s*\|\s*Youtora\s*$/i, "").trim();
+}
+
+function formatHebrewDate(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  return new Intl.DateTimeFormat("he-IL", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(new Date(n * 1000));
+}
+
+function formatDurationText(value) {
+  const n = Math.floor(Number(value || 0));
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const h = Math.floor(n / 3600);
+  const m = Math.floor((n % 3600) / 60);
+  const s = n % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+}
+
 function buildVideoJsonLd({ row, canonical }) {
   const videoId = String(row?.video_id || "").trim();
   if (!videoId) return null;
@@ -583,6 +786,24 @@ function buildVideoJsonLd({ row, canonical }) {
     embedUrl: `https://www.youtube.com/embed/${videoId}`,
     thumbnailUrl: [`https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`],
   };
+
+  const description = cleanSeoText(row?.video_description || "", 900);
+  if (description) json.description = description;
+
+  const tags = [
+    ...parseJsonArray(row?.tags_json),
+    ...parseJsonArray(row?.hashtags_json)
+  ].filter(Boolean).slice(0, 15);
+  if (tags.length) json.keywords = [...new Set(tags)].join(", ");
+
+  const viewCount = Number(row?.view_count || 0);
+  if (Number.isFinite(viewCount) && viewCount > 0) {
+    json.interactionStatistic = {
+      "@type": "InteractionCounter",
+      interactionType: { "@type": "WatchAction" },
+      userInteractionCount: viewCount
+    };
+  }
 
   const channelTitle = String(row?.channel_title || row?.channel_id || "").trim();
   if (channelTitle) {
@@ -679,4 +900,13 @@ function xml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function html(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }

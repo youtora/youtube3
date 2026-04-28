@@ -1,10 +1,7 @@
 import { getDB } from "../_db.js";
-
 // functions/websub/youtube.js
+import { fetchVideoMeta, videoDetailsStmts, nowSec } from "../_shared/video-meta.js";
 
-function nowSec() {
-  return Math.floor(Date.now() / 1000);
-}
 function canonicalTopicUrl(topic) {
   const t = (topic || "").trim();
   if (!t) return "";
@@ -66,76 +63,6 @@ function channelIdFromTopic(topic) {
   return m ? decodeURIComponent(m[1]) : null;
 }
 
-function parseIsoDurationSec(iso) {
-  const m = String(iso || "").match(/^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/);
-  if (!m) return null;
-  const days = parseInt(m[1] || "0", 10);
-  const hours = parseInt(m[2] || "0", 10);
-  const mins = parseInt(m[3] || "0", 10);
-  const secs = parseInt(m[4] || "0", 10);
-  return (((days * 24) + hours) * 60 + mins) * 60 + secs;
-}
-
-
-
-function classifyVideoItem(it) {
-  if (it?.liveStreamingDetails) return "L";
-
-  const sec = parseIsoDurationSec(it?.contentDetails?.duration || "");
-  if (!(Number.isFinite(sec) && sec > 0 && sec <= 180)) return "";
-
-  const w = Number(it?.player?.embedWidth || 0);
-  const h = Number(it?.player?.embedHeight || 0);
-
-  if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > w) {
-    return "S";
-  }
-
-  return "";
-}
-
-async function ytJson(url) {
-  const r = await fetch(url);
-  const t = await r.text();
-  if (!r.ok) throw new Error(`YT ${r.status}: ${t.slice(0, 200)}`);
-  return JSON.parse(t);
-}
-
-function extractDurationSec(it) {
-  const sec = parseIsoDurationSec(it?.contentDetails?.duration || "");
-  return Number.isFinite(sec) && sec > 0 ? sec : null;
-}
-
-function buildVideoMeta(it) {
-  return {
-    video_kind: classifyVideoItem(it),
-    duration_sec: extractDurationSec(it)
-  };
-}
-
-async function fetchVideoMeta(env, ids) {
-  const out = new Map();
-  const uniq = [...new Set((ids || []).filter(Boolean))];
-  if (!env.YT_API_KEY || !uniq.length) return out;
-
-  for (let i = 0; i < uniq.length; i += 50) {
-    const chunk = uniq.slice(i, i + 50);
-    const u = new URL("https://www.googleapis.com/youtube/v3/videos");
-    u.searchParams.set("part", "contentDetails,liveStreamingDetails,player");
-    u.searchParams.set("id", chunk.join(","));
-    u.searchParams.set("maxResults", String(chunk.length));
-    u.searchParams.set("maxWidth", "8192");
-    u.searchParams.set("maxHeight", "8192");
-    u.searchParams.set("key", env.YT_API_KEY);
-
-    const data = await ytJson(u.toString());
-    for (const it of (data?.items || [])) {
-      if (it?.id) out.set(it.id, buildVideoMeta(it));
-    }
-  }
-
-  return out;
-}
 async function sha1HmacHex(secret, bodyU8) {
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey(
@@ -165,7 +92,7 @@ function json(obj, status = 200) {
 }
 
 export async function onRequest({ env, request }) {
-  const DB = getDB(env);
+  env.DB = getDB(env);
   const url = new URL(request.url);
   const debug = url.searchParams.get("debug") === "1";
 
@@ -194,13 +121,13 @@ export async function onRequest({ env, request }) {
 
     const channelId = channelIdFromTopic(topic);
     const ch = channelId
-      ? await DB.prepare(`SELECT id FROM channels WHERE channel_id=? LIMIT 1`).bind(channelId).first()
+      ? await env.DB.prepare(`SELECT id FROM channels WHERE channel_id=? LIMIT 1`).bind(channelId).first()
       : null;
 
     const channelInt = ch?.id ?? null;
 
     if (topic && channelInt) {
-      await DB.prepare(`
+      await env.DB.prepare(`
         INSERT INTO subscriptions(topic_url, channel_int, status, lease_expires_at, last_subscribed_at, last_error)
         VALUES(?, ?, 'active', ?, ?, NULL)
         ON CONFLICT(topic_url) DO UPDATE SET
@@ -272,7 +199,7 @@ export async function onRequest({ env, request }) {
     let channelInt = null;
 
     if (topicHdr) {
-      const sub = await DB.prepare(`
+      const sub = await env.DB.prepare(`
         SELECT channel_int
         FROM subscriptions
         WHERE topic_url=?
@@ -286,7 +213,7 @@ export async function onRequest({ env, request }) {
       const channelId = channelIdFromTopic(topicHdr) || (entries.find(e => e.channelId)?.channelId || null);
 
       if (channelId) {
-        const ch = await DB.prepare(`
+        const ch = await env.DB.prepare(`
           SELECT id
           FROM channels
           WHERE channel_id=?
@@ -312,30 +239,50 @@ export async function onRequest({ env, request }) {
     const stmts = [];
 
     for (const e of entries) {
-      const title = (e.title || "").slice(0, 200);
       const meta = videoMeta.get(e.videoId) || {};
+      const title = (meta.title || e.title || "").slice(0, 200);
       const videoKind = meta.video_kind ?? null;
       const durationSec = meta.duration_sec ?? null;
-      stmts.push(DB.prepare(`
-        INSERT INTO videos(video_id, channel_int, title, published_at, video_kind, duration_sec, updated_at)
-        VALUES(?, ?, ?, ?, ?, ?, ?)
+      const viewCount = meta.view_count ?? null;
+      const likeCount = meta.like_count ?? null;
+      const commentCount = meta.comment_count ?? null;
+      const statsFetchedAt = videoMeta.has(e.videoId) ? now : null;
+
+      stmts.push(env.DB.prepare(`
+        INSERT INTO videos(
+          video_id, channel_int, title, published_at,
+          video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
+          updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
-          channel_int   = excluded.channel_int,
-          title         = excluded.title,
-          published_at  = CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
-          video_kind    = CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
-          duration_sec  = CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
-          updated_at    = excluded.updated_at
+          channel_int      = excluded.channel_int,
+          title            = excluded.title,
+          published_at     = CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
+          video_kind       = CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
+          duration_sec     = CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
+          view_count       = CASE WHEN excluded.view_count IS NOT NULL THEN excluded.view_count ELSE videos.view_count END,
+          like_count       = CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
+          comment_count    = CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
+          stats_fetched_at = CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
+          updated_at       = excluded.updated_at
         WHERE
           videos.channel_int IS NOT excluded.channel_int
           OR videos.title IS NOT excluded.title
           OR (excluded.published_at > 0 AND videos.published_at != excluded.published_at)
           OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind, '') != excluded.video_kind)
           OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec, -1) != excluded.duration_sec)
-      `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, now));
+          OR (excluded.view_count IS NOT NULL AND COALESCE(videos.view_count, -1) != excluded.view_count)
+          OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count, -1) != excluded.like_count)
+          OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count, -1) != excluded.comment_count)
+      `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, viewCount, likeCount, commentCount, statsFetchedAt, now));
+
+      if (videoMeta.has(e.videoId)) {
+        stmts.push(...videoDetailsStmts(env, e.videoId, meta, now));
+      }
     }
 
-    if (stmts.length) await DB.batch(stmts);
+    if (stmts.length) await env.DB.batch(stmts);
 
     console.log("websub POST saved", { channelInt, entries: entries.length, first: entries[0]?.videoId || null });
 

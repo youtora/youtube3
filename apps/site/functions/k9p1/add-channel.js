@@ -1,4 +1,5 @@
 import { getDB } from "../_db.js";
+import { fetchVideoMeta as fetchFullVideoMeta, videoDetailsStmts } from "../_shared/video-meta.js";
 
 function unauthorized() { return new Response("unauthorized", { status: 401 }); }
 function nowSec() { return Math.floor(Date.now() / 1000); }
@@ -277,7 +278,7 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
 
     const data = await ytJson(u.toString());
     const items = data?.items || [];
-    const metaMap = await fetchVideoMeta(env, items.map((it) => it?.contentDetails?.videoId).filter(Boolean));
+    const metaMap = await fetchFullVideoMeta(env, items.map((it) => it?.contentDetails?.videoId).filter(Boolean));
     const stmts = [];
     const now = nowSec();
 
@@ -286,22 +287,42 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
       if (!vid) continue;
 
       const sn = it?.snippet || {};
-      const title = (sn?.title || "").slice(0, 200);
-      const published_at = toUnixSeconds(sn?.publishedAt || null) ?? 0;
       const meta = metaMap.get(vid) || {};
+      const title = (meta.title || sn?.title || "").slice(0, 200);
+      const published_at = toUnixSeconds(meta.published_at_iso || sn?.publishedAt || null) ?? 0;
       const video_kind = meta.video_kind ?? null;
       const duration_sec = meta.duration_sec ?? null;
+      const view_count = meta.view_count ?? null;
+      const like_count = meta.like_count ?? null;
+      const comment_count = meta.comment_count ?? null;
+      const stats_fetched_at = metaMap.has(vid) ? now : null;
 
       stmts.push(DB.prepare(`
-        INSERT INTO videos(video_id, channel_int, title, published_at, video_kind, duration_sec, updated_at)
-        VALUES(?,?,?,?,?,?,?)
+        INSERT INTO videos(
+          video_id, channel_int, title, published_at,
+          video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
+          updated_at
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(video_id) DO UPDATE SET
           title=excluded.title,
           published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
           video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
           duration_sec=CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
+          view_count=CASE WHEN excluded.view_count IS NOT NULL THEN excluded.view_count ELSE videos.view_count END,
+          like_count=CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
+          comment_count=CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
+          stats_fetched_at=CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
           updated_at=excluded.updated_at
-      `).bind(vid, channel_int, title, published_at, video_kind, duration_sec, now));
+      `).bind(
+        vid, channel_int, title, published_at,
+        video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
+        now
+      ));
+
+      if (metaMap.has(vid)) {
+        stmts.push(...videoDetailsStmts(env, vid, meta, now));
+      }
 
       imported++;
     }
@@ -387,6 +408,7 @@ async function subscribeWebSub({ env, DB, request, channel_id, channel_int }) {
 
 export async function onRequest({ env, request }) {
   const DB = getDB(env);
+  env.DB = DB;
   const runtimeEnv = { ...env, DB };
   if (request.method !== "POST") return new Response("use POST", { status: 200 });
 

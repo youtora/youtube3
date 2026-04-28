@@ -1,23 +1,30 @@
 import { getDB } from "../_db.js";
-
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
+}
+
+function intParam(url, name, fallback, min, max) {
+  const n = parseInt(url.searchParams.get(name) || String(fallback), 10);
+  return clamp(Number.isFinite(n) ? n : fallback, min, max);
 }
 
 // cursor format: "<published_or_0>:<row_id>"
 function parseCursor(raw) {
   const s = (raw || "").trim();
   if (!s) return { p: null, id: 0 };
+
   const [pStr, idStr] = s.split(":");
   const p = parseInt(pStr || "0", 10);
   const id = parseInt(idStr || "0", 10);
-  if (Number.isNaN(p) || Number.isNaN(id)) return { p: null, id: 0 };
+
+  if (!Number.isFinite(p) || !Number.isFinite(id)) return { p: null, id: 0 };
   if (id <= 0) return { p: null, id: 0 };
+
   return { p, id };
 }
 
 export async function onRequest({ env, request }) {
-  const DB = getDB(env);
+  env.DB = getDB(env);
   const url = new URL(request.url);
 
   const channel_id = (url.searchParams.get("channel_id") || "").trim();
@@ -30,7 +37,7 @@ export async function onRequest({ env, request }) {
   const kindRaw = (url.searchParams.get("kind") || "").trim().toUpperCase();
   const kind = (kindRaw === "S" || kindRaw === "L") ? kindRaw : null;
 
-  const videos_limit = 200;
+  const videos_limit = intParam(url, "videos_limit", 24, 1, 50);
 
   const videos_cursor_raw =
     url.searchParams.get("videos_cursor") ||
@@ -38,7 +45,7 @@ export async function onRequest({ env, request }) {
 
   const { p: cursorP, id: cursorId } = parseCursor(videos_cursor_raw);
 
-  const chRow = await DB.prepare(
+  const chRow = await env.DB.prepare(
     include_channel || include_playlists
       ? `
         SELECT id, channel_id, title, thumbnail_url
@@ -65,8 +72,9 @@ export async function onRequest({ env, request }) {
   }
 
   if (include_playlists) {
-    const plLimit = clamp(parseInt(url.searchParams.get("playlists_limit") || "50", 10), 1, 200);
-    const pls = await DB.prepare(`
+    const plLimit = intParam(url, "playlists_limit", 50, 1, 200);
+
+    const pls = await env.DB.prepare(`
       SELECT playlist_id, title, thumb_video_id, published_at, item_count
       FROM playlists
       WHERE channel_int = ?
@@ -83,18 +91,18 @@ export async function onRequest({ env, request }) {
     if (kind) {
       vids =
         (cursorP !== null && cursorId > 0)
-          ? await DB.prepare(`
-              SELECT id, video_id, title, published_at, video_kind, duration_sec
-              FROM videos
+          ? await env.DB.prepare(`
+              SELECT id, video_id, title, published_at, video_kind, duration_sec, view_count, like_count, comment_count
+              FROM videos INDEXED BY idx_videos_channel_kind_cover
               WHERE channel_int = ?
                 AND video_kind = ?
                 AND (published_at, id) < (?, ?)
               ORDER BY published_at DESC, id DESC
               LIMIT ?
             `).bind(chRow.id, kind, cursorP, cursorId, videos_limit).all()
-          : await DB.prepare(`
-              SELECT id, video_id, title, published_at, video_kind, duration_sec
-              FROM videos
+          : await env.DB.prepare(`
+              SELECT id, video_id, title, published_at, video_kind, duration_sec, view_count, like_count, comment_count
+              FROM videos INDEXED BY idx_videos_channel_kind_cover
               WHERE channel_int = ?
                 AND video_kind = ?
               ORDER BY published_at DESC, id DESC
@@ -103,16 +111,16 @@ export async function onRequest({ env, request }) {
     } else {
       vids =
         (cursorP !== null && cursorId > 0)
-          ? await DB.prepare(`
-              SELECT id, video_id, title, published_at, video_kind, duration_sec
+          ? await env.DB.prepare(`
+              SELECT id, video_id, title, published_at, video_kind, duration_sec, view_count, like_count, comment_count
               FROM videos INDEXED BY idx_videos_channel_cover
               WHERE channel_int = ?
                 AND (published_at, id) < (?, ?)
               ORDER BY published_at DESC, id DESC
               LIMIT ?
             `).bind(chRow.id, cursorP, cursorId, videos_limit).all()
-          : await DB.prepare(`
-              SELECT id, video_id, title, published_at, video_kind, duration_sec
+          : await env.DB.prepare(`
+              SELECT id, video_id, title, published_at, video_kind, duration_sec, view_count, like_count, comment_count
               FROM videos INDEXED BY idx_videos_channel_cover
               WHERE channel_int = ?
               ORDER BY published_at DESC, id DESC
@@ -127,11 +135,17 @@ export async function onRequest({ env, request }) {
       title: r.title,
       published_at: r.published_at,
       video_kind: r.video_kind || "",
-      duration_sec: r.duration_sec ?? null
+      duration_sec: r.duration_sec ?? null,
+      view_count: r.view_count ?? null,
+      like_count: r.like_count ?? null,
+      comment_count: r.comment_count ?? null
     }));
 
     const last = rows[rows.length - 1];
-    out.videos_next_cursor = last ? `${(last.published_at ?? 0)}:${last.id}` : null;
+    out.videos_next_cursor =
+      rows.length >= videos_limit && last
+        ? `${last.published_at ?? 0}:${last.id}`
+        : null;
   }
 
   return Response.json(out, {
