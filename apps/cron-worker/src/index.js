@@ -508,86 +508,63 @@ async function backfillSome(env, maxCalls=20){
       const u = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
       u.searchParams.set("part","snippet,contentDetails");
       u.searchParams.set("playlistId", playlistId);
-      // חשוב: בטורסו כל שאילתת SQL היא subrequest חיצוני.
-      // לכן בקרון לא מושכים 25/50 פריטים בריצה אחת, כדי לא להגיע למגבלת Cloudflare.
+      // בטורסו כל פנייה למסד היא subrequest חיצוני.
+      // לכן ה-cron עושה רק backfill בסיסי של רשימת הסרטונים.
+      // מילוי description/tags/views נעשה בנפרד דרך /k9p1/refresh-video-meta.
       u.searchParams.set("maxResults","10");
       if(r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
       u.searchParams.set("key", env.YT_API_KEY);
 
       const data = await ytJson(u.toString());
       const items = data?.items || [];
-      const metaMap = await fetchVideoMeta(
-        env,
-        items.map(it => it?.contentDetails?.videoId).filter(Boolean)
-      );
-
       const now = nowSec();
-      const stmts = [];
-      const stmtVideoIds = [];
+      const videos = [];
+      const seen = new Set();
 
       for(const it of items){
-        const vid = String(it?.contentDetails?.videoId || "").trim();
-        if(!vid) continue;
-
         const sn = it?.snippet || {};
-        const meta = metaMap.get(vid) || {};
-        const title = String(meta.title || sn?.title || "").slice(0,200) || "[untitled]";
-        const published_at = toUnixSeconds(meta.published_at_iso || sn?.publishedAt || null) ?? 0;
-        const video_kind = meta.video_kind ?? null;
-        const duration_sec = meta.duration_sec ?? null;
-        const view_count = meta.view_count ?? null;
-        const like_count = meta.like_count ?? null;
-        const comment_count = meta.comment_count ?? null;
-        const stats_fetched_at = metaMap.has(vid) ? now : null;
+        const vid = String(
+          it?.contentDetails?.videoId ||
+          sn?.resourceId?.videoId ||
+          ""
+        ).trim();
 
-        stmts.push(env.DB.prepare(`
-          INSERT INTO videos(
-            video_id, channel_int, title, published_at,
-            video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-            updated_at
-          )
-          VALUES(?,?,?,?,?,?,?,?,?,?,?)
-          ON CONFLICT(video_id) DO UPDATE SET
-            title=excluded.title,
-            published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
-            video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
-            duration_sec=CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
-            view_count=CASE WHEN excluded.view_count IS NOT NULL THEN excluded.view_count ELSE videos.view_count END,
-            like_count=CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
-            comment_count=CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
-            stats_fetched_at=CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
-            updated_at=excluded.updated_at
-          WHERE
-            videos.title IS NOT excluded.title
-            OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
-            OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind,'') != excluded.video_kind)
-            OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec,-1) != COALESCE(excluded.duration_sec,-1))
-            OR (excluded.view_count IS NOT NULL AND COALESCE(videos.view_count,-1) != excluded.view_count)
-            OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count,-1) != excluded.like_count)
-            OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count,-1) != excluded.comment_count)
-        `).bind(
-          vid, r.channel_int, title, published_at,
-          video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          now
-        ));
-        stmtVideoIds.push(vid);
+        // ב-YouTube Uploads playlist יכולים להופיע פריטים מחוקים/פרטיים בלי videoId.
+        // אסור לתת להם להיכנס ל-INSERT כי videos.video_id הוא NOT NULL.
+        if(!vid || seen.has(vid)) continue;
+        seen.add(vid);
 
-        if(metaMap.has(vid)){
-          for(const stmt of videoDetailsStmts(env, vid, meta, now)){
-            stmts.push(stmt);
-            stmtVideoIds.push(vid);
-          }
+        const title = String(sn?.title || "").slice(0,200) || "[untitled]";
+        const published_at = toUnixSeconds(sn?.publishedAt || null) || 0;
+        videos.push({ vid, title, published_at });
+      }
+
+      if(videos.length){
+        const valuesSql = videos.map(() => "(?, ?, ?, ?, ?)").join(", ");
+        const binds = [];
+
+        for(const v of videos){
+          binds.push(v.vid, r.channel_int, v.title, v.published_at, now);
         }
+
+        await env.DB.prepare(`
+          INSERT INTO videos(video_id, channel_int, title, published_at, updated_at)
+          VALUES ${valuesSql}
+          ON CONFLICT(video_id) DO UPDATE SET
+            channel_int  = excluded.channel_int,
+            title        = excluded.title,
+            published_at = CASE
+              WHEN excluded.published_at > 0 THEN excluded.published_at
+              ELSE videos.published_at
+            END,
+            updated_at   = excluded.updated_at
+          WHERE
+            videos.channel_int IS NOT excluded.channel_int
+            OR videos.title IS NOT excluded.title
+            OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
+        `).bind(...binds).run();
       }
 
-
-      // אל תריץ כל statement בנפרד: בטורסו זה יוצר יותר מדי subrequests ב-Worker.
-      // batch נשלח כבקשה אחת/מעט בקשות ל-libSQL ולכן נשארים מתחת למגבלה של Cloudflare.
-      if(stmts.length){
-        await env.DB.batch(stmts);
-      }
-
-      const importedVideos = new Set(stmtVideoIds.filter(Boolean));
       const next = data?.nextPageToken || null;
       const done = next ? 0 : 1;
 
@@ -597,7 +574,7 @@ async function backfillSome(env, maxCalls=20){
             imported_count = imported_count + ?,
             updated_at=?
         WHERE channel_int=?
-      `).bind(next, done, importedVideos.size, nowSec(), r.channel_int).run();
+      `).bind(next, done, videos.length, nowSec(), r.channel_int).run();
 
     } catch (e) {
       if(isPlaylistNotFoundError(e)){
