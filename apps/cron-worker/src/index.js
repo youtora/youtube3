@@ -480,6 +480,74 @@ function isPlaylistNotFoundError(err){
   const msg = String(err?.message || err || "");
   return msg.includes("YT 404") && msg.includes("playlistId");
 }
+function videoUpsertAndMetaStmts(env, rows, ts){
+  const ids = rows.map(r => r.vid).filter(Boolean);
+  return fetchVideoMeta(env, ids).then(metaMap => {
+    const stmts = [];
+
+    for(const row of rows){
+      const meta = metaMap.get(row.vid) || null;
+      const title = (meta?.title || row.title || "[untitled]").slice(0, 200);
+      const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
+
+      stmts.push(env.DB.prepare(`
+        INSERT INTO videos(
+          video_id, channel_int, title, published_at,
+          video_kind, duration_sec,
+          view_count, like_count, comment_count, stats_fetched_at,
+          updated_at
+        )
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(video_id) DO UPDATE SET
+          channel_int      = excluded.channel_int,
+          title            = excluded.title,
+          published_at     = CASE
+            WHEN excluded.published_at > 0 THEN excluded.published_at
+            ELSE videos.published_at
+          END,
+          video_kind       = CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
+          duration_sec     = CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
+          view_count       = CASE WHEN excluded.view_count IS NOT NULL THEN excluded.view_count ELSE videos.view_count END,
+          like_count       = CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
+          comment_count    = CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
+          stats_fetched_at = CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
+          updated_at       = excluded.updated_at
+        WHERE
+          videos.channel_int IS NOT excluded.channel_int
+          OR videos.title IS NOT excluded.title
+          OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
+          OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind,'') != excluded.video_kind)
+          OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec,-1) != excluded.duration_sec)
+          OR (excluded.view_count IS NOT NULL AND COALESCE(videos.view_count,-1) != excluded.view_count)
+          OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count,-1) != excluded.like_count)
+          OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count,-1) != excluded.comment_count)
+          OR (excluded.stats_fetched_at IS NOT NULL AND COALESCE(videos.stats_fetched_at,0) != excluded.stats_fetched_at)
+      `).bind(
+        row.vid,
+        row.channel_int,
+        title,
+        publishedAt,
+        meta?.video_kind ?? null,
+        meta?.duration_sec ?? null,
+        meta?.view_count ?? null,
+        meta?.like_count ?? null,
+        meta?.comment_count ?? null,
+        meta ? ts : null,
+        ts
+      ));
+
+      if(meta){
+        stmts.push(...videoDetailsStmts(env, row.vid, meta, ts));
+      }
+    }
+
+    return {
+      stmts,
+      metaCount: metaMap.size
+    };
+  });
+}
+
 async function backfillSome(env, maxCalls=20){
   if(!env.YT_API_KEY) return;
 
@@ -508,10 +576,9 @@ async function backfillSome(env, maxCalls=20){
       const u = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
       u.searchParams.set("part","snippet,contentDetails");
       u.searchParams.set("playlistId", playlistId);
-      // בטורסו כל פנייה למסד היא subrequest חיצוני.
-      // לכן ה-cron עושה רק backfill בסיסי של רשימת הסרטונים.
-      // מילוי description/tags/views נעשה בנפרד דרך /k9p1/refresh-video-meta.
-      u.searchParams.set("maxResults","10");
+      // כל סרטון שנכנס דרך הקרון מקבל metadata מיד.
+      // נשארים בכמות קטנה כדי לא לעבור את מגבלת subrequests של Cloudflare/Turso.
+      u.searchParams.set("maxResults","5");
       if(r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
       u.searchParams.set("key", env.YT_API_KEY);
 
@@ -529,40 +596,22 @@ async function backfillSome(env, maxCalls=20){
           ""
         ).trim();
 
-        // ב-YouTube Uploads playlist יכולים להופיע פריטים מחוקים/פרטיים בלי videoId.
-        // אסור לתת להם להיכנס ל-INSERT כי videos.video_id הוא NOT NULL.
+        // לפעמים YouTube מחזיר פריטים מחוקים/פרטיים בלי videoId.
         if(!vid || seen.has(vid)) continue;
         seen.add(vid);
 
-        const title = String(sn?.title || "").slice(0,200) || "[untitled]";
-        const published_at = toUnixSeconds(sn?.publishedAt || null) || 0;
-        videos.push({ vid, title, published_at });
+        videos.push({
+          vid,
+          channel_int: r.channel_int,
+          title: String(sn?.title || "").slice(0,200) || "[untitled]",
+          published_at: toUnixSeconds(sn?.publishedAt || null) || 0
+        });
       }
 
       if(videos.length){
-        const valuesSql = videos.map(() => "(?, ?, ?, ?, ?)").join(", ");
-        const binds = [];
-
-        for(const v of videos){
-          binds.push(v.vid, r.channel_int, v.title, v.published_at, now);
-        }
-
-        await env.DB.prepare(`
-          INSERT INTO videos(video_id, channel_int, title, published_at, updated_at)
-          VALUES ${valuesSql}
-          ON CONFLICT(video_id) DO UPDATE SET
-            channel_int  = excluded.channel_int,
-            title        = excluded.title,
-            published_at = CASE
-              WHEN excluded.published_at > 0 THEN excluded.published_at
-              ELSE videos.published_at
-            END,
-            updated_at   = excluded.updated_at
-          WHERE
-            videos.channel_int IS NOT excluded.channel_int
-            OR videos.title IS NOT excluded.title
-            OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
-        `).bind(...binds).run();
+        const { stmts, metaCount } = await videoUpsertAndMetaStmts(env, videos, now);
+        if(stmts.length) await env.DB.batch(stmts);
+        console.log(`backfillSome inserted/updated ${videos.length} videos with ${metaCount} metadata rows channel_int=${r.channel_int}`);
       }
 
       const next = data?.nextPageToken || null;
@@ -597,6 +646,8 @@ async function backfillSome(env, maxCalls=20){
 
 /** בדיקת פיד יומית (catch-up) */
 async function catchUpFeeds(env, maxChannels=5){
+  if(!env.YT_API_KEY) return;
+
   let lastId = parseInt(await getState(env, "feed_cursor", "0"), 10) || 0;
 
   async function loadRows(fromId){
@@ -625,35 +676,31 @@ async function catchUpFeeds(env, maxChannels=5){
 
     if(feed.ok){
       const xml = await feed.text();
-      const entries = extractEntries(xml);
+      const entries = extractEntries(xml).slice(0, 5);
 
       if(entries.length){
         const now = nowSec();
-        const stmts = entries.map(e => {
-          return env.DB.prepare(`
-            INSERT INTO videos(video_id, channel_int, title, published_at, video_kind, duration_sec, updated_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(video_id) DO UPDATE SET
-              channel_int   = excluded.channel_int,
-              title         = excluded.title,
-              published_at  = COALESCE(excluded.published_at, videos.published_at),
-              updated_at    = excluded.updated_at
-            WHERE
-              videos.channel_int IS NOT excluded.channel_int
-              OR videos.title IS NOT excluded.title
-              OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
-          `).bind(
-            e.videoId,
-            ch.id,
-            e.title,
-            e.published_at ?? 0,
-            null,
-            null,
-            now
-          );
-        });
+        const videos = [];
+        const seen = new Set();
 
-        await env.DB.batch(stmts);
+        for(const e of entries){
+          const vid = String(e.videoId || "").trim();
+          if(!vid || seen.has(vid)) continue;
+          seen.add(vid);
+
+          videos.push({
+            vid,
+            channel_int: ch.id,
+            title: String(e.title || "").slice(0, 200) || "[untitled]",
+            published_at: e.published_at || 0
+          });
+        }
+
+        if(videos.length){
+          const { stmts, metaCount } = await videoUpsertAndMetaStmts(env, videos, now);
+          if(stmts.length) await env.DB.batch(stmts);
+          console.log(`catchUpFeeds inserted/updated ${videos.length} videos with ${metaCount} metadata rows channel_int=${ch.id}`);
+        }
       }
     }
 
@@ -812,6 +859,12 @@ export default {
       await setState(env, "cron_last_run", String(started));
 
       let lastErr = "";
+
+      try { await catchUpFeeds(env, 1); }
+      catch (e) {
+        if (!lastErr) lastErr = `catchUpFeeds: ${e?.stack || e}`;
+        console.log(`catchUpFeeds error`, e);
+      }
 
       try { await backfillSome(env, 1); }
       catch (e) {
