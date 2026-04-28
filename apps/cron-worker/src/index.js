@@ -508,7 +508,9 @@ async function backfillSome(env, maxCalls=20){
       const u = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
       u.searchParams.set("part","snippet,contentDetails");
       u.searchParams.set("playlistId", playlistId);
-      u.searchParams.set("maxResults","25");
+      // חשוב: בטורסו כל שאילתת SQL היא subrequest חיצוני.
+      // לכן בקרון לא מושכים 25/50 פריטים בריצה אחת, כדי לא להגיע למגבלת Cloudflare.
+      u.searchParams.set("maxResults","10");
       if(r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
       u.searchParams.set("key", env.YT_API_KEY);
 
@@ -578,20 +580,14 @@ async function backfillSome(env, maxCalls=20){
         }
       }
 
-      const importedVideos = new Set();
 
-      for(let i=0; i<stmts.length; i++){
-        try {
-          await stmts[i].run();
-          if (stmtVideoIds[i]) importedVideos.add(stmtVideoIds[i]);
-        } catch (itemErr) {
-          console.log(
-            `backfillSome item skip channel_int=${r.channel_int} playlistId=${playlistId} video_id=${stmtVideoIds[i]}`,
-            itemErr
-          );
-        }
+      // אל תריץ כל statement בנפרד: בטורסו זה יוצר יותר מדי subrequests ב-Worker.
+      // batch נשלח כבקשה אחת/מעט בקשות ל-libSQL ולכן נשארים מתחת למגבלה של Cloudflare.
+      if(stmts.length){
+        await env.DB.batch(stmts);
       }
 
+      const importedVideos = new Set(stmtVideoIds.filter(Boolean));
       const next = data?.nextPageToken || null;
       const done = next ? 0 : 1;
 
