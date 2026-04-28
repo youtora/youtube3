@@ -323,6 +323,30 @@ function buildVideoMeta(it){
   };
 }
 
+async function fetchVideoMeta(env, ids){
+  const out = new Map();
+  const uniq = [...new Set((ids || []).filter(Boolean))];
+  if(!env.YT_API_KEY || !uniq.length) return out;
+
+  for(let i = 0; i < uniq.length; i += 50){
+    const chunk = uniq.slice(i, i + 50);
+    const u = new URL("https://www.googleapis.com/youtube/v3/videos");
+    u.searchParams.set("part", "snippet,statistics,contentDetails,liveStreamingDetails,player");
+    u.searchParams.set("id", chunk.join(","));
+    u.searchParams.set("maxWidth", "8192");
+    u.searchParams.set("maxHeight", "8192");
+    u.searchParams.set("fields", "items(id,snippet(publishedAt,channelId,title,description,tags,categoryId,defaultLanguage,defaultAudioLanguage,liveBroadcastContent),statistics(viewCount,likeCount,commentCount),contentDetails(duration),liveStreamingDetails,player(embedWidth,embedHeight))");
+    u.searchParams.set("key", env.YT_API_KEY);
+
+    const data = await ytJson(u.toString());
+    for(const it of (data?.items || [])){
+      if(it?.id) out.set(it.id, buildVideoMeta(it));
+    }
+  }
+
+  return out;
+}
+
 function uniqueIndexedTags(tags, type, maxLen){
   const out = [];
   const seen = new Set();
