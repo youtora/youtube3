@@ -532,8 +532,8 @@ function videoUpsertAndMetaStmts(env, rows, ts){
       const title = (meta?.title || row.title || "[untitled]").slice(0, 200);
       const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
 
-      // משתמשים ב-INSERT ... SELECT ... WHERE כדי שגם אם בעתיד vid יהיה ריק,
-      // SQLite לא ינסה להכניס NULL לעמודת videos.video_id.
+      // vid כבר נוקה למעלה, לכן משתמשים ב-VALUES רגיל.
+      // ב-Turso/libSQL זה בטוח יותר מ-INSERT ... SELECT ... WHERE ... ON CONFLICT.
       stmts.push(env.DB.prepare(`
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
@@ -541,8 +541,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
           view_count, like_count, comment_count, stats_fetched_at,
           updated_at
         )
-        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-        WHERE ? IS NOT NULL AND ? <> ''
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int      = excluded.channel_int,
           title            = excluded.title,
@@ -578,9 +577,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
         meta?.like_count ?? null,
         meta?.comment_count ?? null,
         meta ? ts : null,
-        ts,
-        vid,
-        vid
+        ts
       ));
 
       if(meta){
@@ -658,7 +655,23 @@ async function backfillSome(env, maxCalls=20){
       if(videos.length){
         const { stmts, metaCount } = await videoUpsertAndMetaStmts(env, videos, now);
         if(stmts.length) await env.DB.batch(stmts);
-        console.log(`backfillSome inserted/updated ${videos.length} videos with ${metaCount} metadata rows channel_int=${r.channel_int}`);
+
+        const check = await env.DB.prepare(`
+          SELECT
+            COUNT(*) AS videos_in_db,
+            MIN(published_at) AS oldest_published,
+            MAX(updated_at) AS last_video_updated
+          FROM videos
+          WHERE channel_int=?
+        `).bind(r.channel_int).first();
+
+        console.log(
+          `backfillSome page_items=${videos.length} meta_rows=${metaCount} ` +
+          `db_videos=${check?.videos_in_db ?? null} ` +
+          `oldest=${check?.oldest_published ?? null} ` +
+          `last_video_updated=${check?.last_video_updated ?? null} ` +
+          `channel_int=${r.channel_int}`
+        );
       }
 
       const next = data?.nextPageToken || null;
