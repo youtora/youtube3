@@ -603,7 +603,7 @@ async function backfillSome(env, maxCalls=20){
     FROM channel_backfill cb
     JOIN channels c ON c.id = cb.channel_int
     WHERE cb.done=0 AND c.is_active=1
-    ORDER BY cb.channel_int ASC
+    ORDER BY COALESCE(cb.updated_at, 0) ASC, cb.channel_int ASC
     LIMIT ?
   `).bind(maxCalls).all();
 
@@ -625,7 +625,7 @@ async function backfillSome(env, maxCalls=20){
       u.searchParams.set("playlistId", playlistId);
       // כל סרטון שנכנס דרך הקרון מקבל metadata מיד.
       // נשארים בכמות קטנה כדי לא לעבור את מגבלת subrequests של Cloudflare/Turso.
-      u.searchParams.set("maxResults","5");
+      u.searchParams.set("maxResults","20");
       if(r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
       u.searchParams.set("key", env.YT_API_KEY);
 
@@ -914,7 +914,7 @@ export default {
         console.log(`catchUpFeeds error`, e);
       }
 
-      try { await backfillSome(env, 1); }
+      try { await backfillSome(env, 2); }
       catch (e) {
         if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
         console.log(`backfillSome error`, e);
