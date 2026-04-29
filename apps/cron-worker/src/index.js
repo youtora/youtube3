@@ -591,6 +591,127 @@ function videoUpsertAndMetaStmts(env, rows, ts){
     };
   });
 }
+async function upsertVideosAndMetaDirect(env, rows, ts){
+  // גרסה בטוחה במיוחד לקרון: מכניסים את שורת videos אחת-אחת.
+  // כך פריט בעייתי אחד מיוטיוב לא מפיל את כל הדף, והלוג יראה בדיוק מה נשבר.
+  const cleanRows = [];
+  const seen = new Set();
+
+  for (const raw of (rows || [])) {
+    const vid = String(
+      raw?.vid ||
+      raw?.video_id ||
+      raw?.videoId ||
+      ""
+    ).trim();
+
+    if (!vid || seen.has(vid)) {
+      if (!vid) {
+        console.log("upsertVideosAndMetaDirect skip row without video id", JSON.stringify(raw || {}).slice(0, 500));
+      }
+      continue;
+    }
+
+    seen.add(vid);
+
+    cleanRows.push({
+      ...raw,
+      vid,
+      channel_int: raw?.channel_int,
+      title: String(raw?.title || "").slice(0, 200) || "[untitled]",
+      published_at: Number(raw?.published_at || 0) || 0
+    });
+  }
+
+  const ids = cleanRows.map(r => r.vid).filter(Boolean);
+  if (!ids.length) {
+    return {
+      videoRows: 0,
+      metaRows: 0,
+      skipped: (rows || []).length
+    };
+  }
+
+  const metaMap = await fetchVideoMeta(env, ids);
+  let videoRows = 0;
+  let metaRows = 0;
+  let skipped = 0;
+
+  for (const row of cleanRows) {
+    const vid = String(row.vid || "").trim();
+
+    if (!vid) {
+      skipped++;
+      continue;
+    }
+
+    const meta = metaMap.get(vid) || null;
+    const title = (meta?.title || row.title || "[untitled]").slice(0, 200);
+    const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
+
+    try {
+      await env.DB.prepare(`
+        INSERT INTO videos(
+          video_id, channel_int, title, published_at,
+          video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
+          updated_at
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(video_id) DO UPDATE SET
+          channel_int=excluded.channel_int,
+          title=excluded.title,
+          published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
+          video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
+          duration_sec=CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
+          view_count=CASE WHEN excluded.view_count IS NOT NULL THEN excluded.view_count ELSE videos.view_count END,
+          like_count=CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
+          comment_count=CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
+          stats_fetched_at=CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
+          updated_at=excluded.updated_at
+      `).bind(
+        vid,
+        row.channel_int,
+        title,
+        publishedAt,
+        meta?.video_kind ?? null,
+        meta?.duration_sec ?? null,
+        meta?.view_count ?? null,
+        meta?.like_count ?? null,
+        meta?.comment_count ?? null,
+        meta ? ts : null,
+        ts
+      ).run();
+
+      videoRows++;
+    } catch (e) {
+      skipped++;
+      console.log(
+        `video row upsert failed channel_int=${row.channel_int} vid=${vid} ` +
+        `title=${JSON.stringify(title).slice(0, 220)} error=${String(e)}`
+      );
+      continue;
+    }
+
+    if (meta) {
+      try {
+        const detailStmts = videoDetailsStmts(env, vid, meta, ts);
+        if (detailStmts.length) await env.DB.batch(detailStmts);
+        metaRows++;
+      } catch (e) {
+        console.log(
+          `video metadata upsert failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
+        );
+      }
+    }
+  }
+
+  return {
+    videoRows,
+    metaRows,
+    skipped
+  };
+}
+
 
 async function backfillSome(env, maxCalls=20){
   if(!env.YT_API_KEY) return;
@@ -653,8 +774,7 @@ async function backfillSome(env, maxCalls=20){
       }
 
       if(videos.length){
-        const { stmts, metaCount } = await videoUpsertAndMetaStmts(env, videos, now);
-        if(stmts.length) await env.DB.batch(stmts);
+        const writeResult = await upsertVideosAndMetaDirect(env, videos, now);
 
         const check = await env.DB.prepare(`
           SELECT
@@ -666,7 +786,10 @@ async function backfillSome(env, maxCalls=20){
         `).bind(r.channel_int).first();
 
         console.log(
-          `backfillSome page_items=${videos.length} meta_rows=${metaCount} ` +
+          `backfillSome page_items=${videos.length} ` +
+          `video_rows=${writeResult.videoRows} ` +
+          `meta_rows=${writeResult.metaRows} ` +
+          `skipped=${writeResult.skipped} ` +
           `db_videos=${check?.videos_in_db ?? null} ` +
           `oldest=${check?.oldest_published ?? null} ` +
           `last_video_updated=${check?.last_video_updated ?? null} ` +
@@ -913,7 +1036,7 @@ async function refreshPlaylistsMonthly(env, perRun=5, maxPages=10){
 export default {
   async scheduled(event, env, ctx){
     env.DB = createDB(env);
-    console.log("youtube4-cron v6 metadata-safe 2026-04-28");
+    console.log("youtube4-cron v7 direct-video-upsert 2026-04-29");
 
     ctx.waitUntil((async ()=>{
       const started = nowSec();
