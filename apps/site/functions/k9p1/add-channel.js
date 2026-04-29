@@ -262,8 +262,8 @@ async function importPlaylistsForChannel({ env, DB, channel_int, channel_id, max
 }
 
 async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, max_pages = 2 }) {
-  if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0 };
-  if (!uploads_playlist_id) return { ok: false, reason: "missing uploads playlist", imported: 0 };
+  if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0, next_page_token: null, done: 0 };
+  if (!uploads_playlist_id) return { ok: false, reason: "missing uploads playlist", imported: 0, next_page_token: null, done: 1 };
 
   let pageToken = null;
   let imported = 0;
@@ -305,6 +305,7 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
         )
         VALUES(?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(video_id) DO UPDATE SET
+          channel_int=excluded.channel_int,
           title=excluded.title,
           published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
           video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
@@ -333,7 +334,12 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
     if (!pageToken) break;
   }
 
-  return { ok: true, imported };
+  return {
+    ok: true,
+    imported,
+    next_page_token: pageToken,
+    done: pageToken ? 0 : 1,
+  };
 }
 
 async function subscribeWebSub({ env, DB, request, channel_id, channel_int }) {
@@ -502,7 +508,7 @@ export async function onRequest({ env, request }) {
     warnings.push({ step: "playlists", error: playlists.reason });
   }
 
-  let videos = { ok: false, imported: 0, reason: "not attempted" };
+  let videos = { ok: false, imported: 0, reason: "not attempted", next_page_token: null, done: uploads ? 0 : 1 };
   if (videos_pages > 0) {
     try {
       videos = await importRecentVideosForChannel({
@@ -514,9 +520,26 @@ export async function onRequest({ env, request }) {
       });
       if (!videos?.ok) warnings.push({ step: "videos", detail: videos });
     } catch (error) {
-      videos = { ok: false, imported: 0, reason: String(error?.message || error) };
+      videos = { ok: false, imported: 0, reason: String(error?.message || error), next_page_token: null, done: uploads ? 0 : 1 };
       warnings.push({ step: "videos", error: videos.reason });
     }
+  }
+
+  if (videos?.ok) {
+    await DB.prepare(`
+      UPDATE channel_backfill
+      SET next_page_token=?,
+          done=?,
+          imported_count=?,
+          updated_at=?
+      WHERE channel_int=?
+    `).bind(
+      videos.next_page_token || null,
+      videos.done ? 1 : 0,
+      videos.imported || 0,
+      nowSec(),
+      channel_int
+    ).run();
   }
 
   return Response.json({
