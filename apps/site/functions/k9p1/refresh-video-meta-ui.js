@@ -201,14 +201,14 @@ export async function onRequest() {
     const rounds = Math.max(1, Math.min(500, parseInt($("rounds").value || "1", 10)));
     const delay = parseInt($("delay").value || "1000", 10);
     const summary = [];
-    log(`מתחיל ${rounds} סיבובים…`);
+    log(\`מתחיל \${rounds} סיבובים…\`);
 
     try {
       for(let i = 1; i <= rounds; i++){
         if(stopped) break;
 
         $("bar").style.width = Math.round(((i - 1) / rounds) * 100) + "%";
-        $("progressText").textContent = `מריץ סיבוב ${i} מתוך ${rounds}…`;
+        $("progressText").textContent = \`מריץ סיבוב \${i} מתוך \${rounds}…\`;
 
         const result = await refreshOnce();
         summary.push({ round:i, status:result.status, data:result.data });
@@ -257,21 +257,21 @@ export async function onRequest() {
       ["video_details", tables.video_details ?? 0]
     ];
 
-    $("stats").innerHTML = items.map(([name, num]) => `
+    $("stats").innerHTML = items.map(([name, num]) => \`
       <div class="stat">
-        <div class="name">${esc(name)}</div>
-        <div class="num">${Number(num || 0).toLocaleString("he-IL")}</div>
+        <div class="name">\${esc(name)}</div>
+        <div class="num">\${Number(num || 0).toLocaleString("he-IL")}</div>
       </div>
-    `).join("");
+    \`).join("");
   }
 
   function renderLatest(rows){
     if(!rows?.length){
-      $("latest").innerHTML = `<p class="muted">אין נתונים.</p>`;
+      $("latest").innerHTML = \`<p class="muted">אין נתונים.</p>\`;
       return;
     }
 
-    $("latest").innerHTML = `
+    $("latest").innerHTML = \`
       <table>
         <thead>
           <tr>
@@ -283,21 +283,21 @@ export async function onRequest() {
           </tr>
         </thead>
         <tbody>
-          ${rows.map((r) => `
+          \${rows.map((r) => \`
             <tr>
-              <td>${esc(r.id)}</td>
+              <td>\${esc(r.id)}</td>
               <td>
-                <div>${esc(r.title || "")}</div>
-                <div class="muted" dir="ltr">${esc(r.video_id)}</div>
+                <div>\${esc(r.title || "")}</div>
+                <div class="muted" dir="ltr">\${esc(r.video_id)}</div>
               </td>
-              <td>${Number(r.has_details) === 1 ? `<span class="ok">1</span>` : `<span class="bad">0</span>`}</td>
-              <td dir="ltr">${esc(r.stats_fetched_at || "")}</td>
-              <td>${esc(r.description_len ?? "")}</td>
+              <td>\${Number(r.has_details) === 1 ? \`<span class="ok">1</span>\` : \`<span class="bad">0</span>\`}</td>
+              <td dir="ltr">\${esc(r.stats_fetched_at || "")}</td>
+              <td>\${esc(r.description_len ?? "")}</td>
             </tr>
-          `).join("")}
+          \`).join("")}
         </tbody>
       </table>
-    `;
+    \`;
   }
 
   async function loadStatus(showLog = true){
@@ -314,7 +314,7 @@ export async function onRequest() {
       renderLatest(result.data.latest_videos || []);
     } else {
       renderStats({});
-      $("latest").innerHTML = `<pre>${esc(JSON.stringify(result, null, 2))}</pre>`;
+      $("latest").innerHTML = \`<pre>\${esc(JSON.stringify(result, null, 2))}</pre>\`;
     }
   }
 
