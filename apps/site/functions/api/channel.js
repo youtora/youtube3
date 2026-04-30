@@ -48,7 +48,14 @@ export async function onRequest({ env, request }) {
   const chRow = await env.DB.prepare(
     include_channel || include_playlists
       ? `
-        SELECT id, channel_id, title, thumbnail_url
+        SELECT
+          id, channel_id, title, thumbnail_url,
+          description, custom_url, published_at, country, default_language,
+          localized_title, localized_description,
+          branding_title, branding_description, branding_keywords,
+          branding_default_language, branding_country, unsubscribed_trailer,
+          topic_categories_json, topic_ids_json, localizations_json,
+          channel_meta_fetched_at, channel_meta_error
         FROM channels
         WHERE channel_id = ?
       `
@@ -67,7 +74,27 @@ export async function onRequest({ env, request }) {
     out.channel = {
       channel_id: chRow.channel_id,
       title: chRow.title,
-      thumbnail_url: chRow.thumbnail_url
+      thumbnail_url: chRow.thumbnail_url,
+      description: chRow.description || "",
+      custom_url: chRow.custom_url || "",
+      published_at: chRow.published_at ?? null,
+      country: chRow.country || "",
+      default_language: chRow.default_language || "",
+      localized_title: chRow.localized_title || "",
+      localized_description: chRow.localized_description || "",
+      branding: {
+        title: chRow.branding_title || "",
+        description: chRow.branding_description || "",
+        keywords: chRow.branding_keywords || "",
+        default_language: chRow.branding_default_language || "",
+        country: chRow.branding_country || "",
+        unsubscribed_trailer: chRow.unsubscribed_trailer || "",
+      },
+      topic_categories: JSON.parse(chRow.topic_categories_json || "[]"),
+      topic_ids: JSON.parse(chRow.topic_ids_json || "[]"),
+      localizations: JSON.parse(chRow.localizations_json || "{}"),
+      channel_meta_fetched_at: chRow.channel_meta_fetched_at ?? null,
+      channel_meta_error: chRow.channel_meta_error || "",
     };
   }
 
