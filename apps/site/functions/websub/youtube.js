@@ -125,7 +125,6 @@ export async function onRequest({ env, request }) {
       : null;
 
     const channelInt = ch?.id ?? null;
-        channelLanguageCode = ch?.language_code || channelLanguageCode || "";
 
     if (topic && channelInt) {
       await env.DB.prepare(`
