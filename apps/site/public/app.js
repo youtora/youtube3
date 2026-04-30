@@ -590,8 +590,9 @@ async function pageChannels(qs=new URLSearchParams()){
   const topic = (qs.get("topic") || "").trim();
   const keyword = (qs.get("keyword") || "").trim();
   const hasFilter = !!(topic || keyword);
+  const filterTopicTitle = topic ? topicDisplayLabel(topic) : "";
   const filterTitle = topic
-    ? `ערוצים בקטגוריה ${topic}`
+    ? `ערוצים בקטגוריה ${filterTopicTitle}`
     : keyword
       ? `ערוצים לפי מילת מפתח ${keyword}`
       : "ערוצים";
@@ -1177,6 +1178,81 @@ function topicLabel(topic){
   }
 }
 
+function topicDisplayLabel(topic){
+  const label = topicLabel(topic);
+  const map = {
+    Religion: "דת",
+    Society: "חברה",
+    Education: "חינוך",
+    Knowledge: "ידע",
+    Music: "מוזיקה",
+    Entertainment: "בידור",
+    Lifestyle: "סגנון חיים",
+    Technology: "טכנולוגיה",
+    Business: "עסקים",
+    Politics: "פוליטיקה",
+    Sports: "ספורט",
+    Health: "בריאות"
+  };
+  return map[label] || label;
+}
+
+function languageName(code){
+  const raw = String(code || "").trim();
+  if (!raw) return "";
+  const base = raw.split(/[-_]/)[0].toLowerCase();
+  const map = {
+    iw: "עברית",
+    he: "עברית",
+    en: "אנגלית",
+    yi: "יידיש",
+    yid: "יידיש",
+    ru: "רוסית",
+    fr: "צרפתית",
+    es: "ספרדית",
+    de: "גרמנית",
+    ar: "ערבית",
+    it: "איטלקית",
+    pt: "פורטוגזית",
+    uk: "אוקראינית"
+  };
+  return map[base] || raw;
+}
+
+function countryName(code){
+  const raw = String(code || "").trim().toUpperCase();
+  if (!raw) return "";
+  const map = {
+    IL: "ישראל",
+    US: "ארצות הברית",
+    GB: "בריטניה",
+    FR: "צרפת",
+    CA: "קנדה",
+    AU: "אוסטרליה",
+    RU: "רוסיה",
+    UA: "אוקראינה",
+    DE: "גרמניה",
+    ES: "ספרד",
+    IT: "איטליה"
+  };
+  return map[raw] || raw;
+}
+
+function localizationLanguageNames(localizations, primaryCode){
+  const obj = localizations && typeof localizations === "object" ? localizations : {};
+  const primaryBase = String(primaryCode || "").split(/[-_]/)[0].toLowerCase();
+  const names = [];
+
+  for (const key of Object.keys(obj)) {
+    const base = String(key || "").split(/[-_]/)[0].toLowerCase();
+    if (!base || (primaryBase && base === primaryBase)) continue;
+    const name = languageName(base);
+    if (name && !names.includes(name)) names.push(name);
+  }
+
+  return names;
+}
+
 function parseBrandingKeywords(text){
   const s = String(text || "").trim();
   if (!s) return [];
@@ -1205,10 +1281,12 @@ function renderChannelInfoBox(ch){
   const keywords = parseBrandingKeywords(ch.branding?.keywords || "");
   const rawTopics = Array.isArray(ch.topic_categories) ? ch.topic_categories : [];
   const topics = rawTopics.map(topicLabel).filter(Boolean);
-  const lang = ch.default_language || ch.branding?.default_language || "";
-  const country = ch.country || ch.branding?.country || "";
+  const primaryLangCode = ch.default_language || ch.branding?.default_language || "";
+  const primaryLang = languageName(primaryLangCode);
+  const country = countryName(ch.country || ch.branding?.country || "");
+  const extraLangs = localizationLanguageNames(ch.localizations, primaryLangCode);
 
-  if (!description && !keywords.length && !topics.length && !lang && !country) return "";
+  if (!description && !keywords.length && !topics.length && !primaryLang && !country && !extraLangs.length) return "";
 
   return `
     <details class="channelInfoDisclosure">
@@ -1219,8 +1297,14 @@ function renderChannelInfoBox(ch){
 
       <div class="channelInfoBox">
         ${description ? `<div class="channelDescription">${linkifyText(description)}</div>` : ``}
-        ${(lang || country) ? `<div class="channelMetaLine">${lang ? `<span>שפה: ${esc(lang)}</span>` : ``}${country ? `<span>מדינה: ${esc(country)}</span>` : ``}</div>` : ``}
-        ${topics.length ? `<div class="channelChipRow"><span class="channelChipLabel">קטגוריות:</span>${rawTopics.map(t => `<a class="channelChip channelChipLink" href="${channelTopicHref(t)}" data-link>${esc(topicLabel(t))}</a>`).join("")}</div>` : ``}
+        ${(primaryLang || country || extraLangs.length) ? `
+          <div class="channelMetaLine">
+            ${primaryLang ? `<span>שפה ראשית: ${esc(primaryLang)}</span>` : ``}
+            ${extraLangs.length ? `<span>שפות נוספות: ${esc(extraLangs.join(", "))}</span>` : ``}
+            ${country ? `<span>מדינה: ${esc(country)}</span>` : ``}
+          </div>
+        ` : ``}
+        ${topics.length ? `<div class="channelChipRow"><span class="channelChipLabel">קטגוריות:</span>${rawTopics.map(t => `<a class="channelChip channelChipLink" href="${channelTopicHref(t)}" title="${esc(topicLabel(t))}" data-link>${esc(topicDisplayLabel(t))}</a>`).join("")}</div>` : ``}
         ${keywords.length ? `<div class="channelChipRow"><span class="channelChipLabel">מילות מפתח:</span>${keywords.map(k => `<a class="channelChip channelChipLink" href="${channelKeywordHref(k)}" data-link>${esc(k)}</a>`).join("")}</div>` : ``}
       </div>
     </details>
