@@ -8,6 +8,66 @@ function toUnixSeconds(iso) {
   return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
 }
 
+function safeJson(value, fallback) {
+  try {
+    return JSON.stringify(value ?? fallback);
+  } catch (_) {
+    return JSON.stringify(fallback);
+  }
+}
+
+function pickBestThumbnail(thumbnails) {
+  return thumbnails?.high?.url ||
+    thumbnails?.medium?.url ||
+    thumbnails?.default?.url ||
+    null;
+}
+
+function buildChannelMeta(item) {
+  const sn = item?.snippet || {};
+  const brandingChannel = item?.brandingSettings?.channel || {};
+  const topics = item?.topicDetails || {};
+
+  return {
+    title: sn.title || null,
+    description: sn.description || "",
+    custom_url: sn.customUrl || "",
+    published_at: toUnixSeconds(sn.publishedAt || null),
+    thumbnail_url: pickBestThumbnail(sn.thumbnails),
+    country: sn.country || brandingChannel.country || "",
+    default_language: sn.defaultLanguage || brandingChannel.defaultLanguage || "",
+    localized_title: sn.localized?.title || "",
+    localized_description: sn.localized?.description || "",
+    uploads_playlist_id: item?.contentDetails?.relatedPlaylists?.uploads || null,
+
+    branding_title: brandingChannel.title || "",
+    branding_description: brandingChannel.description || "",
+    branding_keywords: brandingChannel.keywords || "",
+    branding_default_language: brandingChannel.defaultLanguage || "",
+    branding_country: brandingChannel.country || "",
+    unsubscribed_trailer: brandingChannel.unsubscribedTrailer || "",
+
+    topic_categories_json: safeJson(topics.topicCategories || [], []),
+    topic_ids_json: safeJson(topics.topicIds || [], []),
+    localizations_json: safeJson(item?.localizations || {}, {}),
+  };
+}
+
+async function fetchChannelMeta(env, channel_id) {
+  if (!env.YT_API_KEY) return { ok: false, error: "missing YT_API_KEY", meta: null };
+
+  const u = new URL("https://www.googleapis.com/youtube/v3/channels");
+  u.searchParams.set("part", "snippet,contentDetails,brandingSettings,topicDetails,localizations");
+  u.searchParams.set("id", channel_id);
+  u.searchParams.set("key", env.YT_API_KEY);
+
+  const data = await ytJson(u.toString());
+  const item = data?.items?.[0];
+  if (!item) return { ok: false, error: "channel not found in YouTube API", meta: null };
+
+  return { ok: true, error: "", meta: buildChannelMeta(item) };
+}
+
 async function ytJson(url) {
   const r = await fetch(url);
   const t = await r.text();
@@ -443,31 +503,77 @@ export async function onRequest({ env, request }) {
   }
 
   const t = nowSec();
-  let title = null, thumb = null, uploads = null;
+  const channelMetaResult = await fetchChannelMeta(runtimeEnv, channel_id).catch((error) => ({
+    ok: false,
+    error: String(error?.message || error),
+    meta: null,
+  }));
 
-  if (env.YT_API_KEY) {
-    const data = await ytJson(
-      `https://www.googleapis.com/youtube/v3/channels?part=snippet,contentDetails&id=${encodeURIComponent(channel_id)}&key=${encodeURIComponent(env.YT_API_KEY)}`
-    );
-    const item = data?.items?.[0];
-    title = item?.snippet?.title || null;
-    thumb =
-      item?.snippet?.thumbnails?.default?.url ||
-      item?.snippet?.thumbnails?.medium?.url ||
-      item?.snippet?.thumbnails?.high?.url ||
-      null;
-    uploads = item?.contentDetails?.relatedPlaylists?.uploads || null;
-  }
+  const meta = channelMetaResult.meta || {};
+  const title = meta.title || null;
+  const thumb = meta.thumbnail_url || null;
+  const uploads = meta.uploads_playlist_id || null;
+  const metaError = channelMetaResult.ok ? "" : (channelMetaResult.error || "failed to fetch channel metadata");
 
   await DB.prepare(`
-    INSERT INTO channels(channel_id, title, thumbnail_url, is_active, created_at, updated_at)
-    VALUES(?, ?, ?, 1, ?, ?)
+    INSERT INTO channels(
+      channel_id, title, thumbnail_url, is_active, created_at, updated_at,
+      description, custom_url, published_at, country, default_language,
+      localized_title, localized_description,
+      branding_title, branding_description, branding_keywords,
+      branding_default_language, branding_country, unsubscribed_trailer,
+      topic_categories_json, topic_ids_json, localizations_json,
+      channel_meta_fetched_at, channel_meta_error
+    )
+    VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(channel_id) DO UPDATE SET
       title = COALESCE(excluded.title, channels.title),
       thumbnail_url = COALESCE(excluded.thumbnail_url, channels.thumbnail_url),
       is_active = 1,
-      updated_at = excluded.updated_at
-  `).bind(channel_id, title, thumb, t, t).run();
+      updated_at = excluded.updated_at,
+      description = excluded.description,
+      custom_url = excluded.custom_url,
+      published_at = COALESCE(excluded.published_at, channels.published_at),
+      country = excluded.country,
+      default_language = excluded.default_language,
+      localized_title = excluded.localized_title,
+      localized_description = excluded.localized_description,
+      branding_title = excluded.branding_title,
+      branding_description = excluded.branding_description,
+      branding_keywords = excluded.branding_keywords,
+      branding_default_language = excluded.branding_default_language,
+      branding_country = excluded.branding_country,
+      unsubscribed_trailer = excluded.unsubscribed_trailer,
+      topic_categories_json = excluded.topic_categories_json,
+      topic_ids_json = excluded.topic_ids_json,
+      localizations_json = excluded.localizations_json,
+      channel_meta_fetched_at = excluded.channel_meta_fetched_at,
+      channel_meta_error = excluded.channel_meta_error
+  `).bind(
+    channel_id,
+    title,
+    thumb,
+    t,
+    t,
+    meta.description || "",
+    meta.custom_url || "",
+    meta.published_at ?? null,
+    meta.country || "",
+    meta.default_language || "",
+    meta.localized_title || "",
+    meta.localized_description || "",
+    meta.branding_title || "",
+    meta.branding_description || "",
+    meta.branding_keywords || "",
+    meta.branding_default_language || "",
+    meta.branding_country || "",
+    meta.unsubscribed_trailer || "",
+    meta.topic_categories_json || "[]",
+    meta.topic_ids_json || "[]",
+    meta.localizations_json || "{}",
+    t,
+    metaError
+  ).run();
 
   const ch = await DB.prepare(`SELECT id FROM channels WHERE channel_id=?`).bind(channel_id).first();
   if (!ch) return new Response("failed to load channel row", { status: 500 });
@@ -550,6 +656,19 @@ export async function onRequest({ env, request }) {
     channel_int,
     title,
     uploads_playlist_id: uploads,
+    channel_meta: {
+      ok: channelMetaResult.ok,
+      error: metaError || null,
+      description_len: (meta.description || "").length,
+      custom_url: meta.custom_url || "",
+      country: meta.country || "",
+      default_language: meta.default_language || "",
+      branding_default_language: meta.branding_default_language || "",
+      branding_country: meta.branding_country || "",
+      has_branding_keywords: Boolean(meta.branding_keywords),
+      topic_categories_count: JSON.parse(meta.topic_categories_json || "[]").length,
+      localizations_count: Object.keys(JSON.parse(meta.localizations_json || "{}")).length,
+    },
     websub,
     playlists,
     videos,

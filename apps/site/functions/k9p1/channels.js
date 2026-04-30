@@ -15,6 +15,12 @@ export async function onRequest({ env, request }) {
              c.thumbnail_url,
              c.is_active,
              c.updated_at,
+             c.country,
+             c.default_language,
+             c.branding_default_language,
+             c.branding_country,
+             c.channel_meta_fetched_at,
+             c.channel_meta_error,
              s.status AS websub_status,
              s.lease_expires_at,
              s.last_error
