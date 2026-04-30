@@ -26,6 +26,7 @@ function pickBestThumbnail(thumbnails) {
 function buildChannelMeta(item) {
   const sn = item?.snippet || {};
   const brandingChannel = item?.brandingSettings?.channel || {};
+  const brandingImage = item?.brandingSettings?.image || {};
   const topics = item?.topicDetails || {};
 
   return {
@@ -34,6 +35,12 @@ function buildChannelMeta(item) {
     custom_url: sn.customUrl || "",
     published_at: toUnixSeconds(sn.publishedAt || null),
     thumbnail_url: pickBestThumbnail(sn.thumbnails),
+    banner_url: brandingImage.bannerExternalUrl ||
+      brandingImage.bannerTvImageUrl ||
+      brandingImage.bannerTabletExtraHdImageUrl ||
+      brandingImage.bannerMobileExtraHdImageUrl ||
+      brandingImage.bannerImageUrl ||
+      "",
     country: sn.country || brandingChannel.country || "",
     default_language: sn.defaultLanguage || brandingChannel.defaultLanguage || "",
     localized_title: sn.localized?.title || "",
@@ -519,13 +526,13 @@ export async function onRequest({ env, request }) {
     INSERT INTO channels(
       channel_id, title, thumbnail_url, is_active, created_at, updated_at,
       description, custom_url, published_at, country, default_language,
-      localized_title, localized_description,
+      localized_title, localized_description, banner_url,
       branding_title, branding_description, branding_keywords,
       branding_default_language, branding_country, unsubscribed_trailer,
       topic_categories_json, topic_ids_json, localizations_json,
       channel_meta_fetched_at, channel_meta_error
     )
-    VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(channel_id) DO UPDATE SET
       title = COALESCE(excluded.title, channels.title),
       thumbnail_url = COALESCE(excluded.thumbnail_url, channels.thumbnail_url),
@@ -538,6 +545,7 @@ export async function onRequest({ env, request }) {
       default_language = excluded.default_language,
       localized_title = excluded.localized_title,
       localized_description = excluded.localized_description,
+      banner_url = excluded.banner_url,
       branding_title = excluded.branding_title,
       branding_description = excluded.branding_description,
       branding_keywords = excluded.branding_keywords,
@@ -562,6 +570,7 @@ export async function onRequest({ env, request }) {
     meta.default_language || "",
     meta.localized_title || "",
     meta.localized_description || "",
+    meta.banner_url || "",
     meta.branding_title || "",
     meta.branding_description || "",
     meta.branding_keywords || "",
