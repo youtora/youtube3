@@ -562,7 +562,7 @@ async function resolveRoute({ url, env }) {
     const channelId = mChannel[1];
     const tab = mChannel[2] || "videos";
     const row = await firstRow(env.DB, `
-      SELECT channel_id, title, thumbnail_url, description, localized_description
+      SELECT channel_id, title, thumbnail_url, banner_url, description, localized_description
       FROM channels
       WHERE channel_id = ?
       LIMIT 1
