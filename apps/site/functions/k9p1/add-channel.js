@@ -24,6 +24,19 @@ function pickBestThumbnail(thumbnails) {
     null;
 }
 
+const YOUTUBE_DESKTOP_BANNER_SUFFIX = "=w1707-fcrop64=1,00005a57ffffa5a8-k-c0xffffffff-no-nd-rj";
+
+function formatChannelBannerUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return "";
+
+  if (raw.includes("yt3.googleusercontent.com/") && !raw.includes("=w") && !raw.includes("-fcrop64=")) {
+    return raw + YOUTUBE_DESKTOP_BANNER_SUFFIX;
+  }
+
+  return raw;
+}
+
 function buildChannelMeta(item) {
   const sn = item?.snippet || {};
   const brandingChannel = item?.brandingSettings?.channel || {};
@@ -37,12 +50,14 @@ function buildChannelMeta(item) {
     custom_url: sn.customUrl || "",
     published_at: toUnixSeconds(sn.publishedAt || null),
     thumbnail_url: pickBestThumbnail(sn.thumbnails),
-    banner_url: brandingImage.bannerExternalUrl ||
+    banner_url: formatChannelBannerUrl(
+      brandingImage.bannerExternalUrl ||
       brandingImage.bannerTvImageUrl ||
       brandingImage.bannerTabletExtraHdImageUrl ||
       brandingImage.bannerMobileExtraHdImageUrl ||
       brandingImage.bannerImageUrl ||
-      "",
+      ""
+    ),
     country: sn.country || brandingChannel.country || "",
     default_language: sn.defaultLanguage || brandingChannel.defaultLanguage || "",
     localized_title: sn.localized?.title || "",
