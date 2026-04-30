@@ -1,6 +1,7 @@
 import { getDB } from "../_db.js";
 // functions/websub/youtube.js
 import { fetchVideoMeta, videoDetailsStmts, nowSec, inferVideoLanguage } from "../_shared/video-meta.js";
+import { channelVideoLanguageStmts } from "../_shared/language.js";
 
 function canonicalTopicUrl(topic) {
   const t = (topic || "").trim();
@@ -284,6 +285,8 @@ export async function onRequest({ env, request }) {
           OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count, -1) != excluded.comment_count)
           OR (excluded.language_code IS NOT NULL AND COALESCE(videos.language_code,'') != excluded.language_code)
       `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, viewCount, likeCount, commentCount, statsFetchedAt, lang.language_code, lang.language_source, now));
+
+      stmts.push(...channelVideoLanguageStmts(env.DB, channelInt, lang.language_code, lang.language_source));
 
       if (videoMeta.has(e.videoId)) {
         stmts.push(...videoDetailsStmts(env, e.videoId, meta, now));
