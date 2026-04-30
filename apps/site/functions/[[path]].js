@@ -562,7 +562,7 @@ async function resolveRoute({ url, env }) {
     const channelId = mChannel[1];
     const tab = mChannel[2] || "videos";
     const row = await firstRow(env.DB, `
-      SELECT channel_id, title, thumbnail_url
+      SELECT channel_id, title, thumbnail_url, description, localized_description
       FROM channels
       WHERE channel_id = ?
       LIMIT 1
@@ -577,7 +577,10 @@ async function resolveRoute({ url, env }) {
     }[tab] || "סרטונים";
 
     const title = row.title || row.channel_id;
-    const description = `${tabText} של הערוץ ${title} ב־Youtora`;
+    const baseDescription = row.localized_description || row.description || "";
+    const description = baseDescription
+      ? `${tabText} של הערוץ ${title} ב־Youtora. ${baseDescription}`.slice(0, 300)
+      : `${tabText} של הערוץ ${title} ב־Youtora`;
     const canonical = `${origin}/${encodeURIComponent(row.channel_id)}/${tab}`;
 
     return {
