@@ -1,6 +1,16 @@
 const $ = (id) => document.getElementById(id);
 
 function esc(s){return (s||"").replace(/[&<>"']/g,c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]))}
+
+const YOUTUBE_DESKTOP_BANNER_SUFFIX = "=w1707-fcrop64=1,00005a57ffffa5a8-k-c0xffffffff-no-nd-rj";
+function channelBannerDisplayUrl(url){
+  const raw = String(url || "").trim();
+  if(!raw) return "";
+  if(raw.includes("yt3.googleusercontent.com/") && !raw.includes("=w") && !raw.includes("-fcrop64=")){
+    return raw + YOUTUBE_DESKTOP_BANNER_SUFFIX;
+  }
+  return raw;
+}
 function fmtDate(unix){
   if(!unix) return "";
   try { return new Date(unix*1000).toLocaleDateString('he-IL', { year:'numeric', month:'2-digit', day:'2-digit' }); }
@@ -1376,11 +1386,12 @@ async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.sear
   const ch = data.channel;
   const playlists = data.playlists || [];
   const tabLabel = channelTabLabel(activeTab);
+  const bannerUrl = channelBannerDisplayUrl(ch.banner_url);
   applyRouteMeta({
     title: `${ch.title || ch.channel_id} | ${tabLabel} | Youtora`,
     description: (ch.localized_description || ch.description || `${tabLabel} של הערוץ ${ch.title || ch.channel_id} ב־Youtora.`).slice(0, 155),
     canonical: `/${encodeURIComponent(ch.channel_id)}/${activeTab}`,
-    image: ch.banner_url || ch.thumbnail_url || '/default-og.png',
+    image: bannerUrl || ch.thumbnail_url || '/default-og.png',
     jsonLd: {
       '@context': 'https://schema.org',
       '@type': 'CollectionPage',
@@ -1391,7 +1402,7 @@ async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.sear
   });
 
   const header = `
-    ${ch.banner_url ? `<div class="channelBanner"><img loading="lazy" decoding="async" src="${esc(ch.banner_url)}" onerror="this.closest(\'.channelBanner\').style.display=\'none\'"></div>` : ``}
+    ${bannerUrl ? `<div class="channelBanner"><img loading="lazy" decoding="async" src="${esc(bannerUrl)}" onerror="this.closest(\'.channelBanner\').style.display=\'none\'"></div>` : ``}
 
     <div class="avatarRow">
       ${ch.thumbnail_url ? `<img class="avatar" style="width:64px;height:64px" loading="lazy" decoding="async" src="${esc(ch.thumbnail_url)}" onerror="this.style.display='none'">`
