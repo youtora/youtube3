@@ -596,9 +596,10 @@ async function pageLive(qs){
 }
 
 /* ---------- PAGES: channels list ---------- */
-function renderChannelCard(ch){
+function renderChannelCard(ch, lang="he"){
+  const href = langUrl(`/${encodeURIComponent(ch.channel_id)}/videos`, lang);
   return `
-    <a class="channelCard" href="/${encodeURIComponent(ch.channel_id)}/videos" data-link>
+    <a class="channelCard" href="${esc(href)}" data-link>
       <span class="channelCardMedia">
         ${ch.thumbnail_url
           ? `<img class="channelCardAvatar" loading="lazy" decoding="async" src="${esc(ch.thumbnail_url)}" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
@@ -673,7 +674,7 @@ async function pageChannels(qs=new URLSearchParams()){
 
     ${filtered.length ? `
       <div class="channelsGrid">
-        ${filtered.map(renderChannelCard).join("")}
+        ${filtered.map(ch => renderChannelCard(ch, lang)).join("")}
       </div>
     ` : `<div class="muted">לא נמצאו ערוצים מתאימים.</div>`}
   `);
