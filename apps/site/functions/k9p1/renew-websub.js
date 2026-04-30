@@ -6,7 +6,9 @@ function nowSec() { return Math.floor(Date.now() / 1000); }
 
 async function subscribeTopic({ env, request, topic_url, channel_int }) {
   const t = nowSec();
-  const origin = (env.PUBLIC_ORIGIN || new URL(request.url).origin).replace(/\/$/, "");
+  // כמו בקוד הישן של add-channel: תמיד להשתמש בדומיין שממנו בוצעה הקריאה.
+  // אם PUBLIC_ORIGIN ישן/שגוי, ה-Hub שולח את האימות לכתובת לא נכונה והסטטוס נשאר pending.
+  const origin = new URL(request.url).origin.replace(/\/$/, "");
   const callback = `${origin}/websub/youtube`;
   const hub = "https://pubsubhubbub.appspot.com/subscribe";
 
@@ -44,7 +46,7 @@ async function subscribeTopic({ env, request, topic_url, channel_int }) {
       last_error = excluded.last_error
   `).bind(topic_url, channel_int, t, last_error).run();
 
-  return { ok: res.ok, topic_url, status: res.status, last_error };
+  return { ok: res.ok, topic_url, status: res.status, callback, last_error };
 }
 
 export async function onRequest({ env, request }) {
