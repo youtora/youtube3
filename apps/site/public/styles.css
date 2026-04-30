@@ -1708,3 +1708,45 @@ a:hover{text-decoration:none}
     min-height:80px;
   }
 }
+
+/* Channel info is hidden by default and opened only on demand */
+.channelInfoDisclosure{
+  margin:12px 0 14px;
+}
+.channelInfoDisclosure > summary{
+  list-style:none;
+  cursor:pointer;
+  width:max-content;
+  max-width:100%;
+  user-select:none;
+}
+.channelInfoDisclosure > summary::-webkit-details-marker{
+  display:none;
+}
+.channelInfoToggle::before{
+  content:"ⓘ";
+  font-size:14px;
+  line-height:1;
+}
+.whenOpen{
+  display:none;
+}
+.channelInfoDisclosure[open] .whenClosed{
+  display:none;
+}
+.channelInfoDisclosure[open] .whenOpen{
+  display:inline;
+}
+.channelInfoDisclosure .channelInfoBox{
+  margin-top:10px;
+}
+.channelChipLink{
+  color:#065fd4;
+  text-decoration:none;
+  cursor:pointer;
+}
+.channelChipLink:hover{
+  background:#eef4ff;
+  border-color:#c8d7ff;
+  text-decoration:none;
+}

@@ -567,24 +567,68 @@ function renderChannelCard(ch){
   `;
 }
 
-async function pageChannels(){
+function normFilterValue(value){
+  return String(value || "").trim().toLowerCase();
+}
+
+function channelTopicMatches(ch, topic){
+  const wanted = normFilterValue(topic);
+  if (!wanted) return true;
+  return arr(ch.topic_categories).some(t => normFilterValue(topicLabel(t)) === wanted);
+}
+
+function channelKeywordMatches(ch, keyword){
+  const wanted = normFilterValue(keyword);
+  if (!wanted) return true;
+  return parseBrandingKeywords(ch.branding_keywords || "")
+    .some(k => normFilterValue(k) === wanted);
+}
+
+async function pageChannels(qs=new URLSearchParams()){
   stopActiveObserver();
-  applyRouteMeta({ title:'Youtora | ערוצים', description:'רשימת כל הערוצים הזמינים ב־Youtora.', canonical:'/channels' });
+
+  const topic = (qs.get("topic") || "").trim();
+  const keyword = (qs.get("keyword") || "").trim();
+  const hasFilter = !!(topic || keyword);
+  const filterTitle = topic
+    ? `ערוצים בקטגוריה ${topic}`
+    : keyword
+      ? `ערוצים לפי מילת מפתח ${keyword}`
+      : "ערוצים";
+
+  applyRouteMeta({
+    title: hasFilter ? `${filterTitle} | Youtora` : 'Youtora | ערוצים',
+    description: hasFilter ? `${filterTitle} ב־Youtora.` : 'רשימת כל הערוצים הזמינים ב־Youtora.',
+    canonical: hasFilter
+      ? `/channels?${topic ? `topic=${encodeURIComponent(topic)}` : `keyword=${encodeURIComponent(keyword)}`}`
+      : '/channels',
+    robots: hasFilter ? 'noindex,follow' : 'index,follow,max-image-preview:large'
+  });
 
   setPage(`<div class="muted">טוען ערוצים…</div>`);
   const data = await api(`/api/channels`);
   const channels = data.channels || [];
+  const filtered = channels
+    .filter(ch => channelTopicMatches(ch, topic))
+    .filter(ch => channelKeywordMatches(ch, keyword));
 
   setPage(`
-    <div class="h1">ערוצים</div>
-    <p class="sub">כל הערוצים במערכת</p>
+    <div class="h1">${esc(filterTitle)}</div>
+    <p class="sub">${hasFilter ? `נמצאו ${filtered.length} ערוצים מתוך ${channels.length}` : `כל הערוצים במערכת`}</p>
+
+    ${hasFilter ? `
+      <div class="btnRow">
+        <a class="btn" href="/channels" data-link>נקה סינון</a>
+      </div>
+    ` : ``}
+
     <div class="hr"></div>
 
-    ${channels.length ? `
+    ${filtered.length ? `
       <div class="channelsGrid">
-        ${channels.map(renderChannelCard).join("")}
+        ${filtered.map(renderChannelCard).join("")}
       </div>
-    ` : `<div class="muted">אין ערוצים עדיין.</div>`}
+    ` : `<div class="muted">לא נמצאו ערוצים מתאימים.</div>`}
   `);
 }
 
@@ -1146,22 +1190,40 @@ function parseBrandingKeywords(text){
   return out;
 }
 
+function channelTopicHref(topic){
+  const label = topicLabel(topic);
+  return label ? `/channels?topic=${encodeURIComponent(label)}` : "/channels";
+}
+
+function channelKeywordHref(keyword){
+  const value = String(keyword || "").trim();
+  return value ? `/channels?keyword=${encodeURIComponent(value)}` : "/channels";
+}
+
 function renderChannelInfoBox(ch){
   const description = (ch.localized_description || ch.description || "").trim();
   const keywords = parseBrandingKeywords(ch.branding?.keywords || "");
-  const topics = Array.isArray(ch.topic_categories) ? ch.topic_categories.map(topicLabel).filter(Boolean) : [];
+  const rawTopics = Array.isArray(ch.topic_categories) ? ch.topic_categories : [];
+  const topics = rawTopics.map(topicLabel).filter(Boolean);
   const lang = ch.default_language || ch.branding?.default_language || "";
   const country = ch.country || ch.branding?.country || "";
 
   if (!description && !keywords.length && !topics.length && !lang && !country) return "";
 
   return `
-    <div class="channelInfoBox">
-      ${description ? `<div class="channelDescription">${esc(description)}</div>` : ``}
-      ${(lang || country) ? `<div class="channelMetaLine">${lang ? `<span>שפה: ${esc(lang)}</span>` : ``}${country ? `<span>מדינה: ${esc(country)}</span>` : ``}</div>` : ``}
-      ${topics.length ? `<div class="channelChipRow"><span class="channelChipLabel">קטגוריות:</span>${topics.map(x => `<span class="channelChip">${esc(x)}</span>`).join("")}</div>` : ``}
-      ${keywords.length ? `<div class="channelChipRow"><span class="channelChipLabel">מילות מפתח:</span>${keywords.map(x => `<span class="channelChip">${esc(x)}</span>`).join("")}</div>` : ``}
-    </div>
+    <details class="channelInfoDisclosure">
+      <summary class="btn channelInfoToggle">
+        <span class="whenClosed">מידע על הערוץ</span>
+        <span class="whenOpen">הסתר מידע</span>
+      </summary>
+
+      <div class="channelInfoBox">
+        ${description ? `<div class="channelDescription">${linkifyText(description)}</div>` : ``}
+        ${(lang || country) ? `<div class="channelMetaLine">${lang ? `<span>שפה: ${esc(lang)}</span>` : ``}${country ? `<span>מדינה: ${esc(country)}</span>` : ``}</div>` : ``}
+        ${topics.length ? `<div class="channelChipRow"><span class="channelChipLabel">קטגוריות:</span>${rawTopics.map(t => `<a class="channelChip channelChipLink" href="${channelTopicHref(t)}" data-link>${esc(topicLabel(t))}</a>`).join("")}</div>` : ``}
+        ${keywords.length ? `<div class="channelChipRow"><span class="channelChipLabel">מילות מפתח:</span>${keywords.map(k => `<a class="channelChip channelChipLink" href="${channelKeywordHref(k)}" data-link>${esc(k)}</a>`).join("")}</div>` : ``}
+      </div>
+    </details>
   `;
 }
 
@@ -1529,7 +1591,7 @@ async function render(){
   if(parts.length === 0) return pageHome();
   if(parts[0] === "shorts") return pageShorts();
   if(parts[0] === "live") return pageLive();
-  if(parts[0] === "channels") return pageChannels();
+  if(parts[0] === "channels") return pageChannels(qs);
   if(parts[0] === "playlists") return pagePlaylists();
   if(parts[0] === "search") return pageSearch((qs.get("q")||"").trim(), (qs.get("scope")||"title").trim());
   if(parts[0] === "hashtag") {
