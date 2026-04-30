@@ -13,7 +13,7 @@
     .nf-toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:10px 0 14px}
     .nf-toolbar label{display:flex;flex-direction:column;gap:4px;font-weight:600}
     .nf-toolbar select,.nf-toolbar input{min-width:130px}
-    .nf-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:12px 0}
+    .nf-stats{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin:12px 0}
     .nf-stat{border:1px solid #ddd;border-radius:12px;padding:10px;background:#fafafa}
     .nf-stat b{display:block;font-size:22px}
     .nf-table{width:100%;border-collapse:collapse}
@@ -72,17 +72,27 @@ https://www.youtube.com/c/SomeChannel"
   <div class="nf-toolbar">
     <label>סטטוס
       <select id="nf_status">
-        <option value="pending" selected>ממתינים לבדיקה</option>
+        <option value="pending" selected>ממתינים לבדיקה אצלך</option>
+        <option value="netfree_unchecked">נטפרי עדיין לא בדקו / לבדיקה חוזרת</option>
         <option value="open">פתוחים</option>
-        <option value="blocked">חסומים</option>
+        <option value="blocked">נבדקו ונחסמו</option>
         <option value="error">שגיאות</option>
-        <option value="unavailable">לא זמינים</option>
+        <option value="unavailable">פרטי / הוסר / לא זמין</option>
         <option value="all">הכול</option>
       </select>
     </label>
 
     <label>כמות
       <input id="nf_limit" type="number" min="1" max="100" value="30">
+    </label>
+
+    <label>סדר
+      <select id="nf_sort">
+        <option value="popular" selected>פופולריים תחילה</option>
+        <option value="newest">חדשים תחילה</option>
+        <option value="oldest">ישנים תחילה</option>
+        <option value="retry">בדיקה חוזרת תחילה</option>
+      </select>
     </label>
 
     <label>חיפוש
@@ -109,6 +119,12 @@ https://www.youtube.com/c/SomeChannel"
     if(!sec) return "";
     try{ return new Date(sec * 1000).toLocaleString("he-IL"); }
     catch{ return String(sec); }
+  }
+
+  function fmtNum(n){
+    const num = Number(n || 0);
+    try{ return num.toLocaleString("he-IL"); }
+    catch{ return String(num); }
   }
 
   function extractDirectChannelId(raw){
@@ -339,11 +355,12 @@ https://www.youtube.com/c/SomeChannel"
 
 
   const NF_STATUS = {
-    0: { label: "ממתין", cls: "nf-pending" },
+    0: { label: "ממתין לבדיקה", cls: "nf-pending" },
     1: { label: "פתוח", cls: "nf-open" },
-    2: { label: "חסום", cls: "nf-block" },
+    2: { label: "נבדק ונחסם", cls: "nf-block" },
     3: { label: "שגיאה", cls: "nf-error" },
-    4: { label: "לא זמין", cls: "nf-error" }
+    4: { label: "לא זמין", cls: "nf-error" },
+    5: { label: "נטפרי לא בדקו", cls: "nf-pending" }
   };
 
   function nfStatusLabel(status){
@@ -360,8 +377,9 @@ https://www.youtube.com/c/SomeChannel"
     const map = new Map(rows.map((r)=>[Number(r.netfree_status), Number(r.count || 0)]));
     const items = [
       [0, "ממתינים"],
+      [5, "נטפרי לא בדקו"],
       [1, "פתוחים"],
-      [2, "חסומים"],
+      [2, "נחסמו"],
       [3, "שגיאות"],
       [4, "לא זמינים"]
     ];
@@ -372,6 +390,15 @@ https://www.youtube.com/c/SomeChannel"
         <b>${map.get(status) || 0}</b>
       </div>
     `).join("");
+
+    if(Number(counts?.recheck_due || 0) > 0){
+      document.getElementById("nf_stats").innerHTML += `
+        <div class="nf-stat">
+          <span>מוכנים לבדיקה חוזרת</span>
+          <b>${Number(counts.recheck_due || 0)}</b>
+        </div>
+      `;
+    }
   }
 
   function renderNetfreeQueue(items){
@@ -399,6 +426,9 @@ https://www.youtube.com/c/SomeChannel"
                   <div>
                     <div style="font-weight:700;line-height:1.4">${esc(v.title || v.video_id)}</div>
                     <div style="font-size:12px;color:#666;margin-top:4px">${esc(v.video_id)} · ${fmtTs(v.published_at)}</div>
+                    <div style="font-size:12px;color:#666;margin-top:4px">
+                      צפיות: ${fmtNum(v.view_count)} · לייקים: ${fmtNum(v.like_count)} · תגובות: ${fmtNum(v.comment_count)}
+                    </div>
                     <div style="margin-top:5px;display:flex;gap:8px;flex-wrap:wrap;font-size:13px">
                       <a target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v=${encodeURIComponent(v.video_id)}">פתח ביוטיוב</a>
                       <a target="_blank" rel="noreferrer" href="/${encodeURIComponent(v.video_id)}">פתח באתר</a>
@@ -414,13 +444,16 @@ https://www.youtube.com/c/SomeChannel"
               <td>
                 <div>ניסיונות: ${Number(v.netfree_check_attempts || 0)}</div>
                 <div style="font-size:12px;color:#666">${v.netfree_checked_at ? `נבדק: ${fmtTs(v.netfree_checked_at)}` : "עדיין לא נבדק"}</div>
+                ${v.netfree_recheck_after ? `<div style="font-size:12px;color:#666">בדיקה חוזרת: ${fmtTs(v.netfree_recheck_after)}</div>` : ``}
                 ${v.netfree_last_error ? `<div style="font-size:12px;color:#b00">${esc(v.netfree_last_error)}</div>` : ``}
               </td>
               <td>
                 <div class="nf-actions">
                   <button class="nf-open" onclick="setNetfreeStatus('${esc(v.video_id)}', 1)">פתוח</button>
-                  <button class="nf-block" onclick="setNetfreeStatus('${esc(v.video_id)}', 2)">חסום</button>
+                  <button class="nf-block" onclick="setNetfreeStatus('${esc(v.video_id)}', 2)">נבדק ונחסם</button>
+                  <button class="nf-pending" onclick="setNetfreeStatus('${esc(v.video_id)}', 5)">נטפרי לא בדקו</button>
                   <button class="nf-error" onclick="setNetfreeStatus('${esc(v.video_id)}', 3)">שגיאה</button>
+                  <button class="nf-error" onclick="setNetfreeStatus('${esc(v.video_id)}', 4)">לא זמין</button>
                   <button class="nf-pending" onclick="setNetfreeStatus('${esc(v.video_id)}', 0)">החזר לבדיקה</button>
                 </div>
               </td>
@@ -435,8 +468,9 @@ https://www.youtube.com/c/SomeChannel"
     const box = document.getElementById("nf_queue");
     const status = document.getElementById("nf_status").value;
     const limit = document.getElementById("nf_limit").value || "30";
+    const sort = document.getElementById("nf_sort").value || "popular";
     const q = document.getElementById("nf_q").value.trim();
-    const params = new URLSearchParams({ status, limit });
+    const params = new URLSearchParams({ status, limit, sort });
 
     if(q) params.set("q", q);
     box.innerHTML = "טוען תור בדיקה…";
@@ -464,16 +498,28 @@ https://www.youtube.com/c/SomeChannel"
     const label = NF_STATUS[Number(status)]?.label || status;
     let error = "";
 
+    let recheck_after_days = null;
+
     if(Number(status) === 3){
       error = prompt("כתוב תיאור שגיאה קצר, או השאר ריק:") || "";
     }
 
+    if(Number(status) === 5){
+      const days = prompt("בעוד כמה ימים לבדוק שוב?", "14");
+      if(days === null) return;
+      recheck_after_days = Math.max(1, Math.min(365, parseInt(days, 10) || 14));
+      error = "נטפרי עדיין לא בדקו - לבדיקה חוזרת";
+    }
+
     if(!confirm(`לסמן את הסרטון ${video_id} כ-${label}?`)) return;
+
+    const body = { video_id, status, error };
+    if(recheck_after_days) body.recheck_after_days = recheck_after_days;
 
     const res = await fetch("/k9p1/netfree-result", {
       method:"POST",
       headers:{ "content-type":"application/json" },
-      body:JSON.stringify({ video_id, status, error })
+      body:JSON.stringify(body)
     });
 
     const text = await res.text();
