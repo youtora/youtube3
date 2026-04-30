@@ -1,5 +1,6 @@
 import { getDB } from "../_db.js";
 import { fetchVideoMeta, videoDetailsStmts, nowSec, inferVideoLanguage } from "../_shared/video-meta.js";
+import { channelVideoLanguageStmts } from "../_shared/language.js";
 
 function clamp(n, a, b){
   return Math.max(a, Math.min(b, n));
@@ -18,13 +19,13 @@ export async function onRequest({ env, request }) {
 
   const rows = includeFresh
     ? await env.DB.prepare(`
-        SELECT video_id, language_code
+        SELECT video_id, channel_int, language_code
         FROM videos
         ORDER BY COALESCE(stats_fetched_at, 0) ASC, id ASC
         LIMIT ?
       `).bind(limit).all()
     : await env.DB.prepare(`
-        SELECT v.video_id, v.language_code
+        SELECT v.video_id, v.channel_int, v.language_code
         FROM videos v
         LEFT JOIN video_details d ON d.video_id = v.video_id
         WHERE d.video_id IS NULL
@@ -36,6 +37,7 @@ export async function onRequest({ env, request }) {
 
   const sourceRows = rows.results || [];
   const currentLangById = new Map(sourceRows.map(r => [r.video_id, r.language_code || ""]));
+  const channelIntById = new Map(sourceRows.map(r => [r.video_id, r.channel_int || null]));
   const ids = sourceRows.map(r => r.video_id).filter(Boolean);
   if (!ids.length) {
     return Response.json({ ok:true, checked:0, updated:0, api_calls:0 }, { headers:{ "cache-control":"no-store" } });
@@ -79,6 +81,7 @@ export async function onRequest({ env, request }) {
       id
     ));
 
+    stmts.push(...channelVideoLanguageStmts(env.DB, channelIntById.get(id), lang.language_code, lang.language_source));
     stmts.push(...videoDetailsStmts(env, id, meta, ts));
   }
 

@@ -1,6 +1,6 @@
 import { getDB } from "../_db.js";
 import { fetchVideoMeta as fetchFullVideoMeta, videoDetailsStmts, inferVideoLanguage } from "../_shared/video-meta.js";
-import { buildChannelLanguage, channelLanguageStmts } from "../_shared/language.js";
+import { buildChannelLanguage, channelLanguageStmts, channelVideoLanguageStmts } from "../_shared/language.js";
 
 function unauthorized() { return new Response("unauthorized", { status: 401 }); }
 function nowSec() { return Math.floor(Date.now() / 1000); }
@@ -411,6 +411,8 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
         video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
         lang.language_code, lang.language_source, now
       ));
+
+      stmts.push(...channelVideoLanguageStmts(DB, channel_int, lang.language_code, lang.language_source));
 
       if (metaMap.has(vid)) {
         stmts.push(...videoDetailsStmts(env, vid, meta, now));
