@@ -9,6 +9,20 @@
     input,button,textarea{padding:10px;font-size:16px}
     textarea{width:100%;box-sizing:border-box;margin:6px 0 12px;min-height:180px;resize:vertical}
     pre{background:#111;color:#eee;padding:12px;border-radius:12px;overflow:auto}
+
+    .nf-toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:10px 0 14px}
+    .nf-toolbar label{display:flex;flex-direction:column;gap:4px;font-weight:600}
+    .nf-toolbar select,.nf-toolbar input{min-width:130px}
+    .nf-stats{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin:12px 0}
+    .nf-stat{border:1px solid #ddd;border-radius:12px;padding:10px;background:#fafafa}
+    .nf-stat b{display:block;font-size:22px}
+    .nf-table{width:100%;border-collapse:collapse}
+    .nf-table th,.nf-table td{padding:8px;border-bottom:1px solid #eee;text-align:right;vertical-align:top}
+    .nf-pill{display:inline-block;border-radius:999px;padding:3px 8px;font-size:12px;font-weight:700;background:#eee}
+    .nf-actions{display:flex;gap:6px;flex-wrap:wrap}
+    .nf-actions button{font-size:13px;padding:7px 9px;border:0;border-radius:9px;cursor:pointer}
+    .nf-open{background:#15803d!important;color:#fff}.nf-block{background:#b91c1c!important;color:#fff}.nf-pending{background:#64748b!important;color:#fff}.nf-error{background:#c2410c!important;color:#fff}
+    @media(max-width:800px){.nf-stats{grid-template-columns:repeat(2,1fr)}.nf-table{font-size:13px}}
   </style>
 </head>
 <body>
@@ -45,6 +59,41 @@ https://www.youtube.com/c/SomeChannel"
   <h2>ערוצים קיימים</h2>
   <button onclick="loadChannels()">טען רשימת ערוצים</button>
   <div id="channels" style="margin-top:12px"></div>
+
+
+  <hr style="margin:24px 0">
+
+  <h2>בדיקת נטפרי לסרטונים מוסתרים</h2>
+  <p style="color:#555;line-height:1.6;margin-top:0">
+    כאן רואים את הסרטונים שנכנסו מערוצים מעורבים. בשלב הזה אפשר לסמן ידנית פתוח/חסום/שגיאה.
+    בשלב הבא נוסיף סקריפט מקומי שיבדוק אוטומטית מהמחשב שלך.
+  </p>
+
+  <div class="nf-toolbar">
+    <label>סטטוס
+      <select id="nf_status">
+        <option value="pending" selected>ממתינים לבדיקה</option>
+        <option value="open">פתוחים</option>
+        <option value="blocked">חסומים</option>
+        <option value="error">שגיאות</option>
+        <option value="unavailable">לא זמינים</option>
+        <option value="all">הכול</option>
+      </select>
+    </label>
+
+    <label>כמות
+      <input id="nf_limit" type="number" min="1" max="100" value="30">
+    </label>
+
+    <label>חיפוש
+      <input id="nf_q" placeholder="כותרת / ערוץ / video_id">
+    </label>
+
+    <button onclick="loadNetfreeQueue()">טען תור בדיקה</button>
+  </div>
+
+  <div id="nf_stats" class="nf-stats"></div>
+  <div id="nf_queue">עדיין לא נטען.</div>
 
 <script>
   const out = (x)=>document.getElementById('out').textContent =
@@ -286,6 +335,158 @@ https://www.youtube.com/c/SomeChannel"
 
     window.__channels = data.channels || [];
     box.innerHTML = renderChannels(window.__channels);
+  }
+
+
+  const NF_STATUS = {
+    0: { label: "ממתין", cls: "nf-pending" },
+    1: { label: "פתוח", cls: "nf-open" },
+    2: { label: "חסום", cls: "nf-block" },
+    3: { label: "שגיאה", cls: "nf-error" },
+    4: { label: "לא זמין", cls: "nf-error" }
+  };
+
+  function nfStatusLabel(status){
+    const item = NF_STATUS[Number(status)] || { label: `לא ידוע ${status}`, cls: "" };
+    return `<span class="nf-pill ${item.cls}">${esc(item.label)}</span>`;
+  }
+
+  function nfThumb(videoId){
+    return `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/mqdefault.jpg`;
+  }
+
+  function renderNetfreeStats(counts){
+    const rows = counts?.by_status || [];
+    const map = new Map(rows.map((r)=>[Number(r.netfree_status), Number(r.count || 0)]));
+    const items = [
+      [0, "ממתינים"],
+      [1, "פתוחים"],
+      [2, "חסומים"],
+      [3, "שגיאות"],
+      [4, "לא זמינים"]
+    ];
+
+    document.getElementById("nf_stats").innerHTML = items.map(([status, label])=>`
+      <div class="nf-stat">
+        <span>${label}</span>
+        <b>${map.get(status) || 0}</b>
+      </div>
+    `).join("");
+  }
+
+  function renderNetfreeQueue(items){
+    if(!items.length){
+      return `<div style="padding:14px;border:1px solid #ddd;border-radius:12px;background:#fafafa">אין סרטונים במצב הזה.</div>`;
+    }
+
+    return `
+      <table class="nf-table">
+        <thead>
+          <tr>
+            <th>סרטון</th>
+            <th>ערוץ</th>
+            <th>סטטוס</th>
+            <th>בדיקה</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${items.map((v)=>`
+            <tr data-video-id="${esc(v.video_id)}">
+              <td>
+                <div style="display:flex;gap:10px;align-items:flex-start">
+                  <img src="${esc(nfThumb(v.video_id))}" style="width:112px;max-width:30vw;border-radius:10px;object-fit:cover;background:#eee">
+                  <div>
+                    <div style="font-weight:700;line-height:1.4">${esc(v.title || v.video_id)}</div>
+                    <div style="font-size:12px;color:#666;margin-top:4px">${esc(v.video_id)} · ${fmtTs(v.published_at)}</div>
+                    <div style="margin-top:5px;display:flex;gap:8px;flex-wrap:wrap;font-size:13px">
+                      <a target="_blank" rel="noreferrer" href="https://www.youtube.com/watch?v=${encodeURIComponent(v.video_id)}">פתח ביוטיוב</a>
+                      <a target="_blank" rel="noreferrer" href="/${encodeURIComponent(v.video_id)}">פתח באתר</a>
+                    </div>
+                  </div>
+                </div>
+              </td>
+              <td>
+                <div style="font-weight:600">${esc(v.channel_title || "")}</div>
+                <div style="font-size:12px;color:#666">${esc(v.channel_id || "")}</div>
+              </td>
+              <td>${nfStatusLabel(v.netfree_status)}</td>
+              <td>
+                <div>ניסיונות: ${Number(v.netfree_check_attempts || 0)}</div>
+                <div style="font-size:12px;color:#666">${v.netfree_checked_at ? `נבדק: ${fmtTs(v.netfree_checked_at)}` : "עדיין לא נבדק"}</div>
+                ${v.netfree_last_error ? `<div style="font-size:12px;color:#b00">${esc(v.netfree_last_error)}</div>` : ``}
+              </td>
+              <td>
+                <div class="nf-actions">
+                  <button class="nf-open" onclick="setNetfreeStatus('${esc(v.video_id)}', 1)">פתוח</button>
+                  <button class="nf-block" onclick="setNetfreeStatus('${esc(v.video_id)}', 2)">חסום</button>
+                  <button class="nf-error" onclick="setNetfreeStatus('${esc(v.video_id)}', 3)">שגיאה</button>
+                  <button class="nf-pending" onclick="setNetfreeStatus('${esc(v.video_id)}', 0)">החזר לבדיקה</button>
+                </div>
+              </td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  async function loadNetfreeQueue(){
+    const box = document.getElementById("nf_queue");
+    const status = document.getElementById("nf_status").value;
+    const limit = document.getElementById("nf_limit").value || "30";
+    const q = document.getElementById("nf_q").value.trim();
+    const params = new URLSearchParams({ status, limit });
+
+    if(q) params.set("q", q);
+    box.innerHTML = "טוען תור בדיקה…";
+
+    const res = await fetch(`/k9p1/netfree-queue?${params.toString()}`, { method:"GET" });
+    const text = await res.text();
+    let data;
+
+    try{ data = JSON.parse(text); }
+    catch{
+      box.innerHTML = `<pre>${esc(text)}</pre>`;
+      return;
+    }
+
+    if(!res.ok || !data.ok){
+      box.innerHTML = `<pre>${esc(JSON.stringify({ status: res.status, data }, null, 2))}</pre>`;
+      return;
+    }
+
+    renderNetfreeStats(data.counts);
+    box.innerHTML = renderNetfreeQueue(data.items || []);
+  }
+
+  async function setNetfreeStatus(video_id, status){
+    const label = NF_STATUS[Number(status)]?.label || status;
+    let error = "";
+
+    if(Number(status) === 3){
+      error = prompt("כתוב תיאור שגיאה קצר, או השאר ריק:") || "";
+    }
+
+    if(!confirm(`לסמן את הסרטון ${video_id} כ-${label}?`)) return;
+
+    const res = await fetch("/k9p1/netfree-result", {
+      method:"POST",
+      headers:{ "content-type":"application/json" },
+      body:JSON.stringify({ video_id, status, error })
+    });
+
+    const text = await res.text();
+    let data;
+
+    try{ data = JSON.parse(text); }
+    catch{ data = text; }
+
+    out({ status: res.status, data });
+
+    if(res.ok && data?.ok){
+      loadNetfreeQueue();
+    }
   }
 
   async function purgeChannel(channel_id){
