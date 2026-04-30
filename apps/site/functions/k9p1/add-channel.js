@@ -435,9 +435,13 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
 
 async function subscribeWebSub({ env, DB, request, channel_id, channel_int }) {
   const t = nowSec();
-  const callback = env.WEBSUB_CALLBACK_URL || `${new URL(request.url).origin}/websub/youtube`;
+  // כמו בקוד הישן: תמיד להשתמש בדומיין שממנו בוצעה הקריאה.
+  // זה מונע מצב שבו WEBSUB_CALLBACK_URL ישן/שגוי גורם להרשמות להישאר pending.
+  const origin = new URL(request.url).origin;
+  const callback = `${origin}/websub/youtube`;
   const topic = `https://www.youtube.com/xml/feeds/videos.xml?channel_id=${encodeURIComponent(channel_id)}`;
-  const hub = env.WEBSUB_HUB_URL || "https://pubsubhubbub.appspot.com/subscribe";
+  // כמו בקוד הישן: Hub הרשמי של YouTube/WebSub.
+  const hub = "https://pubsubhubbub.appspot.com/subscribe";
 
   const existing = await DB.prepare(`
     SELECT status, lease_expires_at
@@ -455,8 +459,6 @@ async function subscribeWebSub({ env, DB, request, channel_id, channel_int }) {
   params.set("hub.callback", callback);
   params.set("hub.topic", topic);
   params.set("hub.verify", "async");
-  params.set("hub.lease_seconds", String(env.WEBSUB_LEASE_SECONDS || 432000));
-
   if (!env.WEBSUB_VERIFY_TOKEN) {
     const last_error = "missing WEBSUB_VERIFY_TOKEN";
 
