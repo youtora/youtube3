@@ -83,8 +83,9 @@ function videosSql({ kind, hasCursor }) {
   if (kind) {
     return `
       SELECT id, video_id, title, published_at, video_kind, duration_sec, view_count, like_count, comment_count, language_code, language_source
-      FROM videos INDEXED BY idx_videos_channel_kind_lang_latest_cover
+      FROM videos INDEXED BY idx_videos_public_channel_kind_lang_latest_cover
       WHERE channel_int = ?
+        AND netfree_status = 1
         AND video_kind = ?
         AND language_code = ?
         ${cursorSql}
@@ -95,8 +96,9 @@ function videosSql({ kind, hasCursor }) {
 
   return `
     SELECT id, video_id, title, published_at, video_kind, duration_sec, view_count, like_count, comment_count, language_code, language_source
-    FROM videos INDEXED BY idx_videos_channel_lang_latest_cover
+    FROM videos INDEXED BY idx_videos_public_channel_lang_latest_cover
     WHERE channel_int = ?
+      AND netfree_status = 1
       AND language_code = ?
       ${cursorSql}
     ORDER BY published_at DESC, id DESC

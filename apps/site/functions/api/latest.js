@@ -49,7 +49,7 @@ function mapVideoRow(r) {
 function selectSql({ kind, cursor }) {
   const cursorSql = cursor ? "AND (v.published_at, v.id) < (?, ?)" : "";
   const kindSql = kind ? "AND v.video_kind = ?" : "";
-  const indexName = kind ? "idx_videos_kind_lang_latest_cover" : "idx_videos_lang_latest_cover";
+  const indexName = kind ? "idx_videos_public_kind_lang_latest_cover" : "idx_videos_public_lang_latest_cover";
 
   return `
     SELECT
@@ -70,7 +70,8 @@ function selectSql({ kind, cursor }) {
     FROM videos AS v INDEXED BY ${indexName}
     JOIN channels AS c
       ON c.id = v.channel_int
-    WHERE v.language_code = ?
+    WHERE v.netfree_status = 1
+      AND v.language_code = ?
       ${kindSql}
       ${cursorSql}
     ORDER BY v.published_at DESC, v.id DESC

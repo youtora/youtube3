@@ -231,6 +231,7 @@ async function serveVideosSitemapIndex(env, url) {
   const countRow = await firstRow(env.DB, `
     SELECT COUNT(*) AS total
     FROM videos
+    WHERE netfree_status = 1
   `, []);
 
   const total = Number(countRow?.total || 0);
@@ -254,6 +255,7 @@ async function serveVideosSitemapPage(env, url, pageNumber) {
   const rows = await safeAll(env.DB, `
     SELECT video_id, published_at
     FROM videos
+    WHERE netfree_status = 1
     ORDER BY published_at DESC
     LIMIT ? OFFSET ?
   `, [VIDEO_SITEMAP_PAGE_SIZE, offset]);
@@ -470,6 +472,7 @@ async function resolveRoute({ url, env }) {
       JOIN channels c ON c.id = v.channel_int
       LEFT JOIN video_details d ON d.video_id = v.video_id
       WHERE v.video_id = ?
+        AND v.netfree_status = 1
       LIMIT 1
     `, [id]);
     if (!row) return { found: false };
@@ -483,8 +486,9 @@ async function resolveRoute({ url, env }) {
         v.title,
         v.published_at,
         v.duration_sec
-      FROM videos v INDEXED BY idx_videos_channel_cover
+      FROM videos v INDEXED BY idx_videos_public_channel_latest_cover
       WHERE v.channel_int = ?
+        AND v.netfree_status = 1
         AND v.video_id <> ?
       ORDER BY v.published_at DESC, v.id DESC
       LIMIT 12

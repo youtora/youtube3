@@ -349,7 +349,7 @@ async function importPlaylistsForChannel({ env, DB, channel_int, channel_id, max
   return { ok: true, imported };
 }
 
-async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, channel_language_code = "", max_pages = 2 }) {
+async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, channel_language_code = "", netfree_default_status = 1, max_pages = 2 }) {
   if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0, next_page_token: null, done: 0 };
   if (!uploads_playlist_id) return { ok: false, reason: "missing uploads playlist", imported: 0, next_page_token: null, done: 1 };
 
@@ -390,9 +390,9 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, updated_at
+          language_code, language_source, netfree_status, updated_at
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int=excluded.channel_int,
           title=excluded.title,
@@ -409,7 +409,7 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
       `).bind(
         vid, channel_int, title, published_at,
         video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-        lang.language_code, lang.language_source, now
+        lang.language_code, lang.language_source, netfree_default_status, now
       ));
 
       stmts.push(...channelVideoLanguageStmts(DB, channel_int, lang.language_code, lang.language_source));
@@ -518,6 +518,8 @@ export async function onRequest({ env, request }) {
   const requested_channel_id = String(body.channel_id || "").trim();
   const playlists_pages = Math.min(Math.max(parseInt(body.playlists_pages || "10", 10), 1), 30);
   const videos_pages = Math.min(Math.max(parseInt(body.videos_pages || "2", 10), 0), 10);
+  const netfree_default_status = Number(body.netfree_default_status) === 0 ? 0 : 1;
+  const show_in_public_channels = Number(body.show_in_public_channels) === 0 ? 0 : 1;
 
   let resolved;
   try {
@@ -559,9 +561,10 @@ export async function onRequest({ env, request }) {
       branding_default_language, branding_country, unsubscribed_trailer,
       topic_categories_json, topic_ids_json, localizations_json,
       channel_meta_fetched_at, channel_meta_error,
-      language_code, language_source, languages_json
+      language_code, language_source, languages_json,
+      netfree_default_status, show_in_public_channels
     )
-    VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(channel_id) DO UPDATE SET
       title = COALESCE(excluded.title, channels.title),
       thumbnail_url = COALESCE(excluded.thumbnail_url, channels.thumbnail_url),
@@ -589,6 +592,8 @@ export async function onRequest({ env, request }) {
       , language_code = excluded.language_code
       , language_source = excluded.language_source
       , languages_json = excluded.languages_json
+      , netfree_default_status = excluded.netfree_default_status
+      , show_in_public_channels = excluded.show_in_public_channels
   `).bind(
     channel_id,
     title,
@@ -616,10 +621,12 @@ export async function onRequest({ env, request }) {
     metaError,
     meta.language_code || "",
     meta.language_source || "",
-    meta.languages_json || "[]"
+    meta.languages_json || "[]",
+    netfree_default_status,
+    show_in_public_channels
   ).run();
 
-  const ch = await DB.prepare(`SELECT id FROM channels WHERE channel_id=?`).bind(channel_id).first();
+  const ch = await DB.prepare(`SELECT id, netfree_default_status FROM channels WHERE channel_id=?`).bind(channel_id).first();
   if (!ch) return new Response("failed to load channel row", { status: 500 });
   const channel_int = ch.id;
 
@@ -672,6 +679,7 @@ export async function onRequest({ env, request }) {
         channel_int,
         uploads_playlist_id: uploads,
         channel_language_code: meta.language_code || "",
+        netfree_default_status: ch.netfree_default_status ?? netfree_default_status,
         max_pages: videos_pages,
       });
       if (!videos?.ok) warnings.push({ step: "videos", detail: videos });
@@ -706,6 +714,8 @@ export async function onRequest({ env, request }) {
     channel_int,
     title,
     uploads_playlist_id: uploads,
+    netfree_default_status: ch.netfree_default_status ?? netfree_default_status,
+    show_in_public_channels,
     channel_meta: {
       ok: channelMetaResult.ok,
       error: metaError || null,

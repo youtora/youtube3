@@ -78,7 +78,8 @@ export async function onRequest({ env, request }) {
             ON v.id = h.video_rowid
           JOIN channels AS c
             ON c.id = v.channel_int
-          WHERE v.language_code = ?
+          WHERE v.netfree_status = 1
+            AND v.language_code = ?
             AND v.id < ?
           ORDER BY v.id DESC
           LIMIT ?
@@ -115,7 +116,8 @@ export async function onRequest({ env, request }) {
             ON v.id = h.video_rowid
           JOIN channels AS c
             ON c.id = v.channel_int
-          WHERE v.language_code = ?
+          WHERE v.netfree_status = 1
+          AND v.language_code = ?
           ORDER BY v.id DESC
           LIMIT ?
         `).bind(match, match, lang, limit).all();
@@ -141,6 +143,7 @@ export async function onRequest({ env, request }) {
           JOIN channels AS c
             ON c.id = v.channel_int
           WHERE video_fts MATCH ?
+            AND v.netfree_status = 1
             AND v.language_code = ?
             AND f.rowid < ?
           ORDER BY f.rowid DESC
@@ -166,6 +169,7 @@ export async function onRequest({ env, request }) {
           JOIN channels AS c
             ON c.id = v.channel_int
           WHERE video_fts MATCH ?
+            AND v.netfree_status = 1
             AND v.language_code = ?
           ORDER BY f.rowid DESC
           LIMIT ?

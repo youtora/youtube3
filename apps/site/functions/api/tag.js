@@ -51,6 +51,7 @@ function buildTagSql(hasCursor) {
       ON c.id = v.channel_int
     WHERE t.tag_type = ?
       AND t.tag_norm = ?
+      AND v.netfree_status = 1
       AND v.language_code = ?
       ${hasCursor ? "AND t.video_rowid < ?" : ""}
     ORDER BY t.video_rowid DESC, t.id DESC

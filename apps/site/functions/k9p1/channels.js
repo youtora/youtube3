@@ -24,6 +24,8 @@ export async function onRequest({ env, request }) {
              c.language_code,
              c.language_source,
              c.languages_json,
+             c.netfree_default_status,
+             c.show_in_public_channels,
              c.channel_meta_fetched_at,
              c.channel_meta_error,
              s.status AS websub_status,

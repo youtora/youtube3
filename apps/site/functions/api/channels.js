@@ -41,6 +41,7 @@ export async function onRequest({ env, request }) {
     LEFT JOIN channel_languages AS all_cl
       ON all_cl.channel_int = c.id
     WHERE c.is_active = 1
+      AND c.show_in_public_channels = 1
       AND cl.language_code = ?
     GROUP BY c.id
     ORDER BY c.title COLLATE NOCASE ASC, c.id ASC

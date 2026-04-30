@@ -115,9 +115,10 @@ export async function onRequest({ env, request }) {
       c.channel_id,
       c.title AS channel_title,
       c.thumbnail_url AS channel_thumbnail_url
-    FROM videos AS v INDEXED BY idx_videos_latest_cover
+    FROM videos AS v INDEXED BY idx_videos_public_latest_cover
     JOIN channels AS c
       ON c.id = v.channel_int
+    WHERE v.netfree_status = 1
     ORDER BY v.published_at DESC, v.id DESC
     LIMIT ?
   `;
@@ -133,10 +134,11 @@ export async function onRequest({ env, request }) {
       c.channel_id,
       c.title AS channel_title,
       c.thumbnail_url AS channel_thumbnail_url
-    FROM videos AS v INDEXED BY idx_videos_kind_latest_cover
+    FROM videos AS v INDEXED BY idx_videos_public_kind_latest_cover
     JOIN channels AS c
       ON c.id = v.channel_int
-    WHERE v.video_kind = ?
+    WHERE v.netfree_status = 1
+      AND v.video_kind = ?
     ORDER BY v.published_at DESC, v.id DESC
     LIMIT ?
   `;
@@ -150,8 +152,9 @@ export async function onRequest({ env, request }) {
 
   const channelVideosSql = `
     SELECT id, video_id, title, published_at, video_kind, duration_sec
-    FROM videos INDEXED BY idx_videos_channel_cover
+    FROM videos INDEXED BY idx_videos_public_channel_latest_cover
     WHERE channel_int = ?
+      AND netfree_status = 1
     ORDER BY published_at DESC, id DESC
     LIMIT ?
   `;

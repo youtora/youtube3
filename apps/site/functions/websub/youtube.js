@@ -199,10 +199,11 @@ export async function onRequest({ env, request }) {
 
     let channelInt = null;
     let channelLanguageCode = "";
+    let netfreeDefaultStatus = 1;
 
     if (topicHdr) {
       const sub = await env.DB.prepare(`
-        SELECT s.channel_int, c.language_code
+        SELECT s.channel_int, c.language_code, c.netfree_default_status
         FROM subscriptions s
         LEFT JOIN channels c ON c.id = s.channel_int
         WHERE topic_url=?
@@ -211,6 +212,7 @@ export async function onRequest({ env, request }) {
 
       channelInt = sub?.channel_int ?? null;
       channelLanguageCode = sub?.language_code || "";
+      netfreeDefaultStatus = sub?.netfree_default_status ?? 1;
     }
 
     if (!channelInt) {
@@ -218,7 +220,7 @@ export async function onRequest({ env, request }) {
 
       if (channelId) {
         const ch = await env.DB.prepare(`
-          SELECT id, language_code
+          SELECT id, language_code, netfree_default_status
           FROM channels
           WHERE channel_id=?
           LIMIT 1
@@ -226,6 +228,7 @@ export async function onRequest({ env, request }) {
 
         channelInt = ch?.id ?? null;
         channelLanguageCode = ch?.language_code || channelLanguageCode || "";
+        netfreeDefaultStatus = ch?.netfree_default_status ?? netfreeDefaultStatus;
       }
     }
 
@@ -258,9 +261,9 @@ export async function onRequest({ env, request }) {
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, updated_at
+          language_code, language_source, netfree_status, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int      = excluded.channel_int,
           title            = excluded.title,
@@ -284,7 +287,7 @@ export async function onRequest({ env, request }) {
           OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count, -1) != excluded.like_count)
           OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count, -1) != excluded.comment_count)
           OR (excluded.language_code IS NOT NULL AND COALESCE(videos.language_code,'') != excluded.language_code)
-      `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, viewCount, likeCount, commentCount, statsFetchedAt, lang.language_code, lang.language_source, now));
+      `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, viewCount, likeCount, commentCount, statsFetchedAt, lang.language_code, lang.language_source, netfreeDefaultStatus, now));
 
       stmts.push(...channelVideoLanguageStmts(env.DB, channelInt, lang.language_code, lang.language_source));
 

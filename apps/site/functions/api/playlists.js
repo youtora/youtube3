@@ -36,6 +36,7 @@ export async function onRequest({ env, request }) {
         JOIN channels c
           ON c.id = p.channel_int
         WHERE p.id < ?
+          AND c.show_in_public_channels = 1
         ORDER BY p.id DESC
         LIMIT ?
       `).bind(cursorId, limit).all()
@@ -52,6 +53,7 @@ export async function onRequest({ env, request }) {
         FROM playlists p
         JOIN channels c
           ON c.id = p.channel_int
+        WHERE c.show_in_public_channels = 1
         ORDER BY p.id DESC
         LIMIT ?
       `).bind(limit).all();

@@ -582,7 +582,8 @@ function videoUpsertAndMetaStmts(env, rows, ts){
       channel_int: raw?.channel_int,
       title: String(raw?.title || "").slice(0, 200) || "[untitled]",
       published_at: Number(raw?.published_at || 0) || 0,
-      channel_language_code: raw?.channel_language_code || raw?.language_code || ""
+      channel_language_code: raw?.channel_language_code || raw?.language_code || "",
+      netfree_default_status: Number(raw?.netfree_default_status) === 0 ? 0 : 1
     });
   }
 
@@ -614,9 +615,9 @@ function videoUpsertAndMetaStmts(env, rows, ts){
           video_id, channel_int, title, published_at,
           video_kind, duration_sec,
           view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, updated_at
+          language_code, language_source, netfree_status, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int      = excluded.channel_int,
           title            = excluded.title,
@@ -657,6 +658,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
         meta ? ts : null,
         lang.language_code,
         lang.language_source,
+        row.netfree_default_status,
         ts
       ));
 
@@ -702,7 +704,8 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
       channel_int: raw?.channel_int,
       title: String(raw?.title || "").slice(0, 200) || "[untitled]",
       published_at: Number(raw?.published_at || 0) || 0,
-      channel_language_code: raw?.channel_language_code || raw?.language_code || ""
+      channel_language_code: raw?.channel_language_code || raw?.language_code || "",
+      netfree_default_status: Number(raw?.netfree_default_status) === 0 ? 0 : 1
     });
   }
 
@@ -738,9 +741,9 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, updated_at
+          language_code, language_source, netfree_status, updated_at
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int=excluded.channel_int,
           title=excluded.title,
@@ -767,6 +770,7 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
         meta ? ts : null,
         lang.language_code,
         lang.language_source,
+        row.netfree_default_status,
         ts
       ).run();
 
@@ -808,7 +812,7 @@ async function backfillSome(env, maxCalls=20){
   if(!env.YT_API_KEY) return;
 
   const rows = await env.DB.prepare(`
-    SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token, c.language_code
+    SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token, c.language_code, c.netfree_default_status
     FROM channel_backfill cb
     JOIN channels c ON c.id = cb.channel_int
     WHERE cb.done=0 AND c.is_active=1
@@ -861,7 +865,8 @@ async function backfillSome(env, maxCalls=20){
           channel_int: r.channel_int,
           title: String(sn?.title || "").slice(0,200) || "[untitled]",
           published_at: toUnixSeconds(sn?.publishedAt || null) || 0,
-          channel_language_code: r.language_code || ""
+          channel_language_code: r.language_code || "",
+          netfree_default_status: r.netfree_default_status ?? 1
         });
       }
 
@@ -927,7 +932,7 @@ async function catchUpFeeds(env, maxChannels=5){
 
   async function loadRows(fromId){
     return env.DB.prepare(`
-      SELECT id, channel_id, language_code
+      SELECT id, channel_id, language_code, netfree_default_status
       FROM channels
       WHERE is_active=1 AND id>?
       ORDER BY id ASC
@@ -968,7 +973,8 @@ async function catchUpFeeds(env, maxChannels=5){
             channel_int: ch.id,
             title: String(e.title || "").slice(0, 200) || "[untitled]",
             published_at: e.published_at || 0,
-            channel_language_code: ch.language_code || ""
+            channel_language_code: ch.language_code || "",
+            netfree_default_status: ch.netfree_default_status ?? 1
           });
         }
 

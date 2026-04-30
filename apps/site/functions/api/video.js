@@ -38,6 +38,7 @@ export async function onRequest({ env, request }) {
     LEFT JOIN channels c
       ON c.id = v.channel_int
     WHERE v.video_id = ?
+      AND v.netfree_status = 1
     LIMIT 1
   `).bind(video_id).first();
 
@@ -72,8 +73,9 @@ export async function onRequest({ env, request }) {
       view_count,
       like_count,
       comment_count
-    FROM videos INDEXED BY idx_videos_channel_cover
+    FROM videos INDEXED BY idx_videos_public_channel_latest_cover
     WHERE channel_int = ?
+      AND netfree_status = 1
       AND video_id <> ?
     ORDER BY published_at DESC, id DESC
     LIMIT ?

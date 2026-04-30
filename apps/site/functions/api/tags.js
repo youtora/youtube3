@@ -31,6 +31,7 @@ export async function onRequest({ env, request }) {
     JOIN videos AS v
       ON v.id = t.video_rowid
     WHERE t.tag_type = ?
+      AND v.netfree_status = 1
       AND v.language_code = ?
     GROUP BY t.tag_norm
     ORDER BY video_count DESC, latest_published_at DESC, t.tag_norm ASC

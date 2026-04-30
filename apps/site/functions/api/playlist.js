@@ -26,6 +26,7 @@ export async function onRequest({ env, request }) {
     FROM playlists p
     JOIN channels c ON c.id = p.channel_int
     WHERE p.playlist_id = ?
+      AND c.show_in_public_channels = 1
     LIMIT 1
   `).bind(playlist_id).first();
 
