@@ -51,7 +51,7 @@ export async function onRequest({ env, request }) {
         SELECT
           id, channel_id, title, thumbnail_url,
           description, custom_url, published_at, country, default_language,
-          localized_title, localized_description,
+          localized_title, localized_description, banner_url,
           branding_title, branding_description, branding_keywords,
           branding_default_language, branding_country, unsubscribed_trailer,
           topic_categories_json, topic_ids_json, localizations_json,
@@ -82,6 +82,7 @@ export async function onRequest({ env, request }) {
       default_language: chRow.default_language || "",
       localized_title: chRow.localized_title || "",
       localized_description: chRow.localized_description || "",
+      banner_url: chRow.banner_url || "",
       branding: {
         title: chRow.branding_title || "",
         description: chRow.branding_description || "",

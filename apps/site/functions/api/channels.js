@@ -3,8 +3,8 @@ export async function onRequest({ env }) {
   env.DB = getDB(env);
   const rows = await env.DB.prepare(`
     SELECT
-      id, channel_id, title, thumbnail_url,
-      country, default_language, branding_default_language,
+      id, channel_id, title, thumbnail_url, banner_url,
+      country, default_language, branding_default_language, branding_keywords,
       topic_categories_json, channel_meta_fetched_at
     FROM channels
     WHERE is_active = 1
