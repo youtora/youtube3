@@ -29,6 +29,32 @@ function parseJson(value, fallback) {
   catch { return fallback; }
 }
 
+function splitLanguages(value) {
+  return String(value || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+async function channelIndexedLanguages(DB, channelInt, fallbackJson) {
+  const rows = await DB.prepare(`
+    SELECT language_code
+    FROM channel_languages
+    WHERE channel_int = ?
+    ORDER BY CASE language_code
+      WHEN 'he' THEN 1
+      WHEN 'en' THEN 2
+      WHEN 'fr' THEN 3
+      WHEN 'yi' THEN 4
+      WHEN 'ru' THEN 5
+      ELSE 9
+    END, language_code
+  `).bind(channelInt).all();
+
+  const fromIndex = (rows.results || []).map(r => r.language_code).filter(Boolean);
+  return fromIndex.length ? fromIndex : parseJson(fallbackJson || "[]", []);
+}
+
 function channelSelect(includeFull) {
   return includeFull
     ? `
@@ -124,6 +150,9 @@ export async function onRequest({ env, request }) {
   if (!chRow) return new Response("not found", { status: 404 });
 
   const out = { lang };
+  const indexedLanguages = include_channel
+    ? await channelIndexedLanguages(env.DB, chRow.id, chRow.languages_json || "[]")
+    : [];
 
   if (include_channel) {
     out.channel = {
@@ -140,7 +169,7 @@ export async function onRequest({ env, request }) {
       banner_url: chRow.banner_url || "",
       language_code: chRow.language_code || "",
       language_source: chRow.language_source || "",
-      languages: parseJson(chRow.languages_json || "[]", []),
+      languages: indexedLanguages,
       branding: {
         title: chRow.branding_title || "",
         description: chRow.branding_description || "",
