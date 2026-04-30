@@ -1,4 +1,5 @@
 import { getDB } from "../_db.js";
+import { normalizePublicLang } from "../_shared/language.js";
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
@@ -50,6 +51,7 @@ function buildTagSql(hasCursor) {
       ON c.id = v.channel_int
     WHERE t.tag_type = ?
       AND t.tag_norm = ?
+      AND v.language_code = ?
       ${hasCursor ? "AND t.video_rowid < ?" : ""}
     ORDER BY t.video_rowid DESC, t.id DESC
     LIMIT ?
@@ -64,6 +66,7 @@ export async function onRequest({ env, request }) {
   const valueNorm = normalizeTagKey(value);
   const type = normalizeTagType((url.searchParams.get("type") || "tag").trim().toLowerCase());
   const limit = intParam(url, "limit", 50, 1, 100);
+  const lang = normalizePublicLang(url.searchParams.get("lang") || "he", "he");
   const cursor = parseCursor(url.searchParams.get("cursor") || "");
 
   if (!valueNorm) {
@@ -76,8 +79,8 @@ export async function onRequest({ env, request }) {
   const sql = buildTagSql(cursor !== null);
 
   const res = cursor !== null
-    ? await env.DB.prepare(sql).bind(type, valueNorm, cursor, limit).all()
-    : await env.DB.prepare(sql).bind(type, valueNorm, limit).all();
+    ? await env.DB.prepare(sql).bind(type, valueNorm, lang, cursor, limit).all()
+    : await env.DB.prepare(sql).bind(type, valueNorm, lang, limit).all();
 
   const rows = res.results || [];
   const results = rows.map(v => ({
@@ -102,7 +105,7 @@ export async function onRequest({ env, request }) {
       : null;
 
   return Response.json(
-    { results, next_cursor, value, type },
+    { results, next_cursor, value, type, lang },
     { headers: { "cache-control": "public, max-age=30" } }
   );
 }

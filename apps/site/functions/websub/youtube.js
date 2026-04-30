@@ -1,6 +1,6 @@
 import { getDB } from "../_db.js";
 // functions/websub/youtube.js
-import { fetchVideoMeta, videoDetailsStmts, nowSec } from "../_shared/video-meta.js";
+import { fetchVideoMeta, videoDetailsStmts, nowSec, inferVideoLanguage } from "../_shared/video-meta.js";
 
 function canonicalTopicUrl(topic) {
   const t = (topic || "").trim();
@@ -125,6 +125,7 @@ export async function onRequest({ env, request }) {
       : null;
 
     const channelInt = ch?.id ?? null;
+        channelLanguageCode = ch?.language_code || channelLanguageCode || "";
 
     if (topic && channelInt) {
       await env.DB.prepare(`
@@ -197,16 +198,19 @@ export async function onRequest({ env, request }) {
     }
 
     let channelInt = null;
+    let channelLanguageCode = "";
 
     if (topicHdr) {
       const sub = await env.DB.prepare(`
-        SELECT channel_int
-        FROM subscriptions
+        SELECT s.channel_int, c.language_code
+        FROM subscriptions s
+        LEFT JOIN channels c ON c.id = s.channel_int
         WHERE topic_url=?
         LIMIT 1
       `).bind(topicHdr).first();
 
       channelInt = sub?.channel_int ?? null;
+      channelLanguageCode = sub?.language_code || "";
     }
 
     if (!channelInt) {
@@ -214,13 +218,14 @@ export async function onRequest({ env, request }) {
 
       if (channelId) {
         const ch = await env.DB.prepare(`
-          SELECT id
+          SELECT id, language_code
           FROM channels
           WHERE channel_id=?
           LIMIT 1
         `).bind(channelId).first();
 
         channelInt = ch?.id ?? null;
+        channelLanguageCode = ch?.language_code || channelLanguageCode || "";
       }
     }
 
@@ -247,14 +252,15 @@ export async function onRequest({ env, request }) {
       const likeCount = meta.like_count ?? null;
       const commentCount = meta.comment_count ?? null;
       const statsFetchedAt = videoMeta.has(e.videoId) ? now : null;
+      const lang = inferVideoLanguage(meta, channelLanguageCode);
 
       stmts.push(env.DB.prepare(`
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          updated_at
+          language_code, language_source, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int      = excluded.channel_int,
           title            = excluded.title,
@@ -265,6 +271,8 @@ export async function onRequest({ env, request }) {
           like_count       = CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
           comment_count    = CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
           stats_fetched_at = CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
+          language_code    = CASE WHEN excluded.language_code IS NOT NULL AND excluded.language_code <> '' THEN excluded.language_code ELSE videos.language_code END,
+          language_source  = CASE WHEN excluded.language_source IS NOT NULL AND excluded.language_source <> '' THEN excluded.language_source ELSE videos.language_source END,
           updated_at       = excluded.updated_at
         WHERE
           videos.channel_int IS NOT excluded.channel_int
@@ -275,7 +283,8 @@ export async function onRequest({ env, request }) {
           OR (excluded.view_count IS NOT NULL AND COALESCE(videos.view_count, -1) != excluded.view_count)
           OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count, -1) != excluded.like_count)
           OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count, -1) != excluded.comment_count)
-      `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, viewCount, likeCount, commentCount, statsFetchedAt, now));
+          OR (excluded.language_code IS NOT NULL AND COALESCE(videos.language_code,'') != excluded.language_code)
+      `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, viewCount, likeCount, commentCount, statsFetchedAt, lang.language_code, lang.language_source, now));
 
       if (videoMeta.has(e.videoId)) {
         stmts.push(...videoDetailsStmts(env, e.videoId, meta, now));

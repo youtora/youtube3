@@ -1,3 +1,7 @@
+import { inferVideoLanguage } from "./language.js";
+
+export { inferVideoLanguage };
+
 export function nowSec(){
   return Math.floor(Date.now() / 1000);
 }

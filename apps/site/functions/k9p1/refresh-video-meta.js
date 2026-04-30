@@ -1,5 +1,5 @@
 import { getDB } from "../_db.js";
-import { fetchVideoMeta, videoDetailsStmts, nowSec } from "../_shared/video-meta.js";
+import { fetchVideoMeta, videoDetailsStmts, nowSec, inferVideoLanguage } from "../_shared/video-meta.js";
 
 function clamp(n, a, b){
   return Math.max(a, Math.min(b, n));
@@ -18,13 +18,13 @@ export async function onRequest({ env, request }) {
 
   const rows = includeFresh
     ? await env.DB.prepare(`
-        SELECT video_id
+        SELECT video_id, language_code
         FROM videos
         ORDER BY COALESCE(stats_fetched_at, 0) ASC, id ASC
         LIMIT ?
       `).bind(limit).all()
     : await env.DB.prepare(`
-        SELECT v.video_id
+        SELECT v.video_id, v.language_code
         FROM videos v
         LEFT JOIN video_details d ON d.video_id = v.video_id
         WHERE d.video_id IS NULL
@@ -34,7 +34,9 @@ export async function onRequest({ env, request }) {
         LIMIT ?
       `).bind(staleBefore, limit).all();
 
-  const ids = (rows.results || []).map(r => r.video_id).filter(Boolean);
+  const sourceRows = rows.results || [];
+  const currentLangById = new Map(sourceRows.map(r => [r.video_id, r.language_code || ""]));
+  const ids = sourceRows.map(r => r.video_id).filter(Boolean);
   if (!ids.length) {
     return Response.json({ ok:true, checked:0, updated:0, api_calls:0 }, { headers:{ "cache-control":"no-store" } });
   }
@@ -47,6 +49,8 @@ export async function onRequest({ env, request }) {
     const meta = metaMap.get(id);
     if (!meta) continue;
 
+    const lang = inferVideoLanguage(meta, currentLangById.get(id) || "");
+
     stmts.push(env.DB.prepare(`
       UPDATE videos
       SET
@@ -57,6 +61,8 @@ export async function onRequest({ env, request }) {
         like_count       = CASE WHEN ? IS NOT NULL THEN ? ELSE like_count END,
         comment_count    = CASE WHEN ? IS NOT NULL THEN ? ELSE comment_count END,
         stats_fetched_at = ?,
+        language_code    = CASE WHEN ? IS NOT NULL AND ? <> '' THEN ? ELSE language_code END,
+        language_source  = CASE WHEN ? IS NOT NULL AND ? <> '' THEN ? ELSE language_source END,
         updated_at       = ?
       WHERE video_id = ?
     `).bind(
@@ -67,6 +73,8 @@ export async function onRequest({ env, request }) {
       meta.like_count ?? null, meta.like_count ?? null,
       meta.comment_count ?? null, meta.comment_count ?? null,
       ts,
+      lang.language_code, lang.language_code, lang.language_code,
+      lang.language_source, lang.language_source, lang.language_source,
       ts,
       id
     ));

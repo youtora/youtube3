@@ -73,6 +73,36 @@ function fmtLikes(value){
 function arr(value){
   return Array.isArray(value) ? value : [];
 }
+const LANG_FILTERS = ["he", "en", "fr", "yi", "ru"];
+function normalizeLangFilter(value){
+  const raw = String(value || "").trim().toLowerCase().replace(/_/g, "-");
+  const base = raw.split("-")[0];
+  const map = { iw:"he", he:"he", en:"en", fr:"fr", yi:"yi", yid:"yi", ji:"yi", ru:"ru" };
+  const lang = map[base] || base;
+  return LANG_FILTERS.includes(lang) ? lang : "he";
+}
+function currentLang(qs){
+  return normalizeLangFilter((qs || new URLSearchParams(location.search)).get("lang") || "he");
+}
+function langParam(lang){
+  return normalizeLangFilter(lang);
+}
+function langUrl(path, lang, extraParams={}){
+  const q = new URLSearchParams();
+  q.set("lang", langParam(lang));
+  for (const [key, value] of Object.entries(extraParams || {})) {
+    if (value !== undefined && value !== null && String(value).trim() !== "") q.set(key, String(value));
+  }
+  return path + "?" + q.toString();
+}
+function renderLanguageFilter(activeLang, path, extraParams={}){
+  const active = langParam(activeLang);
+  const links = LANG_FILTERS.map(code => {
+    const cls = code === active ? "languagePill active" : "languagePill";
+    return '<a class="' + cls + '" href="' + esc(langUrl(path, code, extraParams)) + '" data-link>' + esc(languageName(code)) + '</a>';
+  }).join("");
+  return '<div class="languageFilter" role="navigation" aria-label="סינון לפי שפה"><span class="languageFilterLabel">שפה:</span>' + links + '</div>';
+}
 function normalizeTagName(value){
   return String(value || "")
     .trim()
@@ -447,7 +477,7 @@ function startInfiniteScroll({ sentinelEl, onNearEnd, enabled = true, rootMargin
 }
 
 /* ---------- LATEST PAGES: home / shorts / live ---------- */
-let latestState = { kind: "", cursor: null, loading: false, done: false, token: 0 };
+let latestState = { kind: "", lang: "he", cursor: null, loading: false, done: false, token: 0 };
 
 function latestPageMeta(kind){
   if(kind === "S") return { title: "שורטים", sub: "השורטים האחרונים מכל הערוצים" };
@@ -455,15 +485,17 @@ function latestPageMeta(kind){
   return { title: "בית", sub: "הסרטונים האחרונים מכל הערוצים" };
 }
 
-async function pageLatest(kind=""){
-  latestState = { kind, cursor: null, loading: false, done: false, token: latestState.token + 1 };
+async function pageLatest(kind="", qs=new URLSearchParams(location.search)){
+  const lang = currentLang(qs);
+  latestState = { kind, lang, cursor: null, loading: false, done: false, token: latestState.token + 1 };
   const t = latestState.token;
   const meta = latestPageMeta(kind);
   applyRouteMeta(latestSeo(kind));
 
   setPage(`
     <div class="h1">${esc(meta.title)}</div>
-    <p class="sub">${esc(meta.sub)}</p>
+    <p class="sub">${esc(meta.sub)} · ${esc(languageName(lang))}</p>
+    ${renderLanguageFilter(lang, kind === "S" ? "/shorts" : kind === "L" ? "/live" : "/")}
     <div class="hr"></div>
 
     <div id="latestGrid" class="${kind === "S" ? "shortsGrid" : "grid"}"></div>
@@ -512,6 +544,7 @@ async function latestLoadMore(token){
 
   const url =
     `/api/latest?limit=24` +
+    `&lang=${encodeURIComponent(latestState.lang)}` +
     (latestState.kind ? `&kind=${encodeURIComponent(latestState.kind)}` : "") +
     (latestState.cursor ? `&cursor=${encodeURIComponent(latestState.cursor)}` : "");
 
@@ -540,16 +573,16 @@ async function latestLoadMore(token){
   latestState.loading = false;
 }
 
-async function pageHome(){
-  return pageLatest("");
+async function pageHome(qs){
+  return pageLatest("", qs);
 }
 
-async function pageShorts(){
-  return pageLatest("S");
+async function pageShorts(qs){
+  return pageLatest("S", qs);
 }
 
-async function pageLive(){
-  return pageLatest("L");
+async function pageLive(qs){
+  return pageLatest("L", qs);
 }
 
 /* ---------- PAGES: channels list ---------- */
@@ -587,6 +620,7 @@ function channelKeywordMatches(ch, keyword){
 async function pageChannels(qs=new URLSearchParams()){
   stopActiveObserver();
 
+  const lang = currentLang(qs);
   const topic = (qs.get("topic") || "").trim();
   const keyword = (qs.get("keyword") || "").trim();
   const hasFilter = !!(topic || keyword);
@@ -598,8 +632,8 @@ async function pageChannels(qs=new URLSearchParams()){
       : "ערוצים";
 
   applyRouteMeta({
-    title: hasFilter ? `${filterTitle} | Youtora` : 'Youtora | ערוצים',
-    description: hasFilter ? `${filterTitle} ב־Youtora.` : 'רשימת כל הערוצים הזמינים ב־Youtora.',
+    title: hasFilter ? `${filterTitle} | ${languageName(lang)} | Youtora` : `Youtora | ערוצים | ${languageName(lang)}`,
+    description: hasFilter ? `${filterTitle} ב־Youtora בשפה ${languageName(lang)}.` : `רשימת הערוצים ב־Youtora בשפה ${languageName(lang)}.`,
     canonical: hasFilter
       ? `/channels?${topic ? `topic=${encodeURIComponent(topic)}` : `keyword=${encodeURIComponent(keyword)}`}`
       : '/channels',
@@ -607,7 +641,7 @@ async function pageChannels(qs=new URLSearchParams()){
   });
 
   setPage(`<div class="muted">טוען ערוצים…</div>`);
-  const data = await api(`/api/channels`);
+  const data = await api(`/api/channels?lang=${encodeURIComponent(lang)}`);
   const channels = data.channels || [];
   const filtered = channels
     .filter(ch => channelTopicMatches(ch, topic))
@@ -615,11 +649,13 @@ async function pageChannels(qs=new URLSearchParams()){
 
   setPage(`
     <div class="h1">${esc(filterTitle)}</div>
-    <p class="sub">${hasFilter ? `נמצאו ${filtered.length} ערוצים מתוך ${channels.length}` : `כל הערוצים במערכת`}</p>
+    <p class="sub">${hasFilter ? `נמצאו ${filtered.length} ערוצים מתוך ${channels.length}` : `ערוצים בשפה ${languageName(lang)}`}</p>
+
+    ${renderLanguageFilter(lang, "/channels", { ...(topic ? { topic } : {}), ...(keyword ? { keyword } : {}) })}
 
     ${hasFilter ? `
       <div class="btnRow">
-        <a class="btn" href="/channels" data-link>נקה סינון</a>
+        <a class="btn" href="${langUrl("/channels", lang)}" data-link>נקה סינון</a>
       </div>
     ` : ``}
 
@@ -1281,10 +1317,12 @@ function renderChannelInfoBox(ch){
   const keywords = parseBrandingKeywords(ch.branding?.keywords || "");
   const rawTopics = Array.isArray(ch.topic_categories) ? ch.topic_categories : [];
   const topics = rawTopics.map(topicLabel).filter(Boolean);
-  const primaryLangCode = ch.default_language || ch.branding?.default_language || "";
+  const primaryLangCode = ch.language_code || ch.default_language || ch.branding?.default_language || "";
   const primaryLang = languageName(primaryLangCode);
   const country = countryName(ch.country || ch.branding?.country || "");
-  const extraLangs = localizationLanguageNames(ch.localizations, primaryLangCode);
+  const allLangNames = arr(ch.languages).map(languageName).filter(Boolean);
+  const extraLangs = [...new Set([...allLangNames, ...localizationLanguageNames(ch.localizations, primaryLangCode)])]
+    .filter(name => name && name !== primaryLang);
 
   if (!description && !keywords.length && !topics.length && !primaryLang && !country && !extraLangs.length) return "";
 
@@ -1314,10 +1352,11 @@ function renderChannelInfoBox(ch){
 /* ---------- CHANNEL: infinite load videos ---------- */
 let channelVideosState = { key: "", cursor: null, loading: false, done: false, token: 0 };
 
-async function pageChannel(channel_id, tab){
+async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.search)){
   stopActiveObserver();
 
   const activeTab = ["videos", "playlists", "shorts", "live"].includes(tab) ? tab : "videos";
+  const lang = currentLang(qs);
   const kind = activeTab === "shorts" ? "S" : activeTab === "live" ? "L" : "";
 
   setPage(`<div class="muted">טוען ערוץ…</div>`);
@@ -1330,6 +1369,7 @@ async function pageChannel(channel_id, tab){
     `&include_playlists=${include_playlists}` +
     `&include_videos=${include_videos}` +
     `&videos_limit=24` +
+    `&lang=${encodeURIComponent(lang)}` +
     (kind ? `&kind=${encodeURIComponent(kind)}` : "")
   );
 
@@ -1368,10 +1408,12 @@ async function pageChannel(channel_id, tab){
 
     ${renderChannelInfoBox(ch)}
 
+    ${activeTab !== "playlists" ? renderLanguageFilter(lang, `/${encodeURIComponent(channel_id)}/${activeTab}`) : ``}
+
     <div class="tabs">
-      <a class="tab ${activeTab==="videos"?"active":""}" href="/${encodeURIComponent(channel_id)}/videos" data-link>סרטונים</a>
-      <a class="tab ${activeTab==="shorts"?"active":""}" href="/${encodeURIComponent(channel_id)}/shorts" data-link>שורטים</a>
-      <a class="tab ${activeTab==="live"?"active":""}" href="/${encodeURIComponent(channel_id)}/live" data-link>שידורים חיים</a>
+      <a class="tab ${activeTab==="videos"?"active":""}" href="${langUrl(`/${encodeURIComponent(channel_id)}/videos`, lang)}" data-link>סרטונים</a>
+      <a class="tab ${activeTab==="shorts"?"active":""}" href="${langUrl(`/${encodeURIComponent(channel_id)}/shorts`, lang)}" data-link>שורטים</a>
+      <a class="tab ${activeTab==="live"?"active":""}" href="${langUrl(`/${encodeURIComponent(channel_id)}/live`, lang)}" data-link>שידורים חיים</a>
       <a class="tab ${activeTab==="playlists"?"active":""}" href="/${encodeURIComponent(channel_id)}/playlists" data-link>פלייליסטים</a>
     </div>
   `;
@@ -1390,7 +1432,7 @@ async function pageChannel(channel_id, tab){
   }
 
   channelVideosState = {
-    key: `${channel_id}|${kind}`,
+    key: `${channel_id}|${kind}|${lang}`,
     cursor: data.videos_next_cursor || null,
     loading: false,
     done: !data.videos_next_cursor,
@@ -1424,7 +1466,7 @@ async function pageChannel(channel_id, tab){
   const hint = document.getElementById("chHint");
   const sentinel = document.getElementById("chSentinel");
 
-  btn.onclick = () => channelLoadMoreVideos(t, ch.channel_id, ch.title, ch.thumbnail_url, kind);
+  btn.onclick = () => channelLoadMoreVideos(t, ch.channel_id, ch.title, ch.thumbnail_url, kind, lang);
 
   const hasIO = typeof IntersectionObserver !== "undefined";
   if (!hasIO && !channelVideosState.done) btn.style.display = "inline-flex";
@@ -1433,16 +1475,16 @@ async function pageChannel(channel_id, tab){
   if (hasIO && !channelVideosState.done) {
     startInfiniteScroll({
       sentinelEl: sentinel,
-      onNearEnd: () => channelLoadMoreVideos(t, ch.channel_id, ch.title, ch.thumbnail_url, kind),
+      onNearEnd: () => channelLoadMoreVideos(t, ch.channel_id, ch.title, ch.thumbnail_url, kind, lang),
       enabled: true,
       rootMargin: "200px 0px",
     });
   }
 }
 
-async function channelLoadMoreVideos(token, channel_id, channel_title, channel_thumbnail_url, kind=""){
+async function channelLoadMoreVideos(token, channel_id, channel_title, channel_thumbnail_url, kind="", lang="he"){
   if (channelVideosState.loading || channelVideosState.done) return;
-  if (channelVideosState.key !== `${channel_id}|${kind}`) return;
+  if (channelVideosState.key !== `${channel_id}|${kind}|${lang}`) return;
 
   channelVideosState.loading = true;
 
@@ -1457,6 +1499,7 @@ async function channelLoadMoreVideos(token, channel_id, channel_title, channel_t
     `/api/channel?channel_id=${encodeURIComponent(channel_id)}` +
     `&include_channel=0&include_playlists=0&include_videos=1` +
     `&videos_limit=24` +
+    `&lang=${encodeURIComponent(lang)}` +
     (kind ? `&kind=${encodeURIComponent(kind)}` : "") +
     (channelVideosState.cursor ? `&videos_cursor=${encodeURIComponent(channelVideosState.cursor)}` : "");
 
@@ -1672,9 +1715,9 @@ async function render(){
   const { parts, qs } = route();
   setActiveNav();
 
-  if(parts.length === 0) return pageHome();
-  if(parts[0] === "shorts") return pageShorts();
-  if(parts[0] === "live") return pageLive();
+  if(parts.length === 0) return pageHome(qs);
+  if(parts[0] === "shorts") return pageShorts(qs);
+  if(parts[0] === "live") return pageLive(qs);
   if(parts[0] === "channels") return pageChannels(qs);
   if(parts[0] === "playlists") return pagePlaylists();
   if(parts[0] === "search") return pageSearch((qs.get("q")||"").trim(), (qs.get("scope")||"title").trim());
@@ -1690,7 +1733,7 @@ async function render(){
   // /UC.../videos /shorts /live /playlists
   if(parts.length >= 1 && isChannelId(parts[0])){
     const tab = parts[1] || "videos";
-    return pageChannel(parts[0], ["videos", "shorts", "live", "playlists"].includes(tab) ? tab : "videos");
+    return pageChannel(parts[0], ["videos", "shorts", "live", "playlists"].includes(tab) ? tab : "videos", qs);
   }
 
   // /PL...

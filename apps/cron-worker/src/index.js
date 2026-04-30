@@ -467,6 +467,44 @@ function parseJsonArray(value){
   }
 }
 
+function normalizeLangCode(code){
+  const raw = String(code || "").trim().toLowerCase().replace(/_/g, "-");
+  if(!raw) return "";
+  const base = raw.split("-")[0];
+  const map = { iw:"he", he:"he", heb:"he", en:"en", eng:"en", fr:"fr", fra:"fr", fre:"fr", yi:"yi", yid:"yi", ji:"yi", ru:"ru", rus:"ru" };
+  return map[base] || base;
+}
+
+function isSupportedLang(code){
+  return ["he", "en", "fr", "yi", "ru"].includes(normalizeLangCode(code));
+}
+
+function guessLanguageFromText(...texts){
+  const text = texts.map(v => String(v || "")).join(" ").trim();
+  if(!text) return "";
+  const hebrew = (text.match(/[\u0590-\u05FF]/g) || []).length;
+  const cyrillic = (text.match(/[\u0400-\u04FF]/g) || []).length;
+  const latin = (text.match(/[A-Za-zÀ-ÖØ-öø-ÿ]/g) || []).length;
+  if(cyrillic >= 3 && cyrillic >= hebrew && cyrillic >= latin) return "ru";
+  if(hebrew >= 3 && hebrew >= cyrillic) return "he";
+  return "";
+}
+
+function inferVideoLanguage(meta={}, fallbackChannelLang=""){
+  const candidates = [
+    [meta.default_audio_language, "default_audio_language"],
+    [meta.default_language, "default_language"],
+    [fallbackChannelLang, "channel_language"],
+  ];
+  for(const [code, source] of candidates){
+    const lang = normalizeLangCode(code);
+    if(isSupportedLang(lang)) return { language_code: lang, language_source: source };
+  }
+  const guessed = guessLanguageFromText(meta.title, meta.description);
+  if(guessed) return { language_code: guessed, language_source: "text_heuristic" };
+  return { language_code: "unknown", language_source: "unknown" };
+}
+
 
 async function fetchChannelUploadsPlaylistId(env, channelId){
   const u = new URL("https://www.googleapis.com/youtube/v3/channels");
@@ -508,7 +546,8 @@ function videoUpsertAndMetaStmts(env, rows, ts){
       vid,
       channel_int: raw?.channel_int,
       title: String(raw?.title || "").slice(0, 200) || "[untitled]",
-      published_at: Number(raw?.published_at || 0) || 0
+      published_at: Number(raw?.published_at || 0) || 0,
+      channel_language_code: raw?.channel_language_code || raw?.language_code || ""
     });
   }
 
@@ -531,6 +570,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
       const meta = metaMap.get(vid) || null;
       const title = (meta?.title || row.title || "[untitled]").slice(0, 200);
       const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
+      const lang = inferVideoLanguage(meta || {}, row.channel_language_code || "");
 
       // vid כבר נוקה למעלה, לכן משתמשים ב-VALUES רגיל.
       // ב-Turso/libSQL זה בטוח יותר מ-INSERT ... SELECT ... WHERE ... ON CONFLICT.
@@ -539,9 +579,9 @@ function videoUpsertAndMetaStmts(env, rows, ts){
           video_id, channel_int, title, published_at,
           video_kind, duration_sec,
           view_count, like_count, comment_count, stats_fetched_at,
-          updated_at
+          language_code, language_source, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int      = excluded.channel_int,
           title            = excluded.title,
@@ -555,6 +595,8 @@ function videoUpsertAndMetaStmts(env, rows, ts){
           like_count       = CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
           comment_count    = CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
           stats_fetched_at = CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
+          language_code    = CASE WHEN excluded.language_code IS NOT NULL AND excluded.language_code <> '' THEN excluded.language_code ELSE videos.language_code END,
+          language_source  = CASE WHEN excluded.language_source IS NOT NULL AND excluded.language_source <> '' THEN excluded.language_source ELSE videos.language_source END,
           updated_at       = excluded.updated_at
         WHERE
           videos.channel_int IS NOT excluded.channel_int
@@ -566,6 +608,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
           OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count,-1) != excluded.like_count)
           OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count,-1) != excluded.comment_count)
           OR (excluded.stats_fetched_at IS NOT NULL AND COALESCE(videos.stats_fetched_at,0) != excluded.stats_fetched_at)
+          OR (excluded.language_code IS NOT NULL AND COALESCE(videos.language_code,'') != excluded.language_code)
       `).bind(
         vid,
         row.channel_int,
@@ -577,6 +620,8 @@ function videoUpsertAndMetaStmts(env, rows, ts){
         meta?.like_count ?? null,
         meta?.comment_count ?? null,
         meta ? ts : null,
+        lang.language_code,
+        lang.language_source,
         ts
       ));
 
@@ -619,7 +664,8 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
       vid,
       channel_int: raw?.channel_int,
       title: String(raw?.title || "").slice(0, 200) || "[untitled]",
-      published_at: Number(raw?.published_at || 0) || 0
+      published_at: Number(raw?.published_at || 0) || 0,
+      channel_language_code: raw?.channel_language_code || raw?.language_code || ""
     });
   }
 
@@ -648,15 +694,16 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     const meta = metaMap.get(vid) || null;
     const title = (meta?.title || row.title || "[untitled]").slice(0, 200);
     const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
+      const lang = inferVideoLanguage(meta || {}, row.channel_language_code || "");
 
     try {
       await env.DB.prepare(`
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          updated_at
+          language_code, language_source, updated_at
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int=excluded.channel_int,
           title=excluded.title,
@@ -667,6 +714,8 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
           like_count=CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
           comment_count=CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
           stats_fetched_at=CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
+          language_code=CASE WHEN excluded.language_code IS NOT NULL AND excluded.language_code <> '' THEN excluded.language_code ELSE videos.language_code END,
+          language_source=CASE WHEN excluded.language_source IS NOT NULL AND excluded.language_source <> '' THEN excluded.language_source ELSE videos.language_source END,
           updated_at=excluded.updated_at
       `).bind(
         vid,
@@ -679,6 +728,8 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
         meta?.like_count ?? null,
         meta?.comment_count ?? null,
         meta ? ts : null,
+        lang.language_code,
+        lang.language_source,
         ts
       ).run();
 
@@ -717,7 +768,7 @@ async function backfillSome(env, maxCalls=20){
   if(!env.YT_API_KEY) return;
 
   const rows = await env.DB.prepare(`
-    SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token
+    SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token, c.language_code
     FROM channel_backfill cb
     JOIN channels c ON c.id = cb.channel_int
     WHERE cb.done=0 AND c.is_active=1
@@ -769,7 +820,8 @@ async function backfillSome(env, maxCalls=20){
           vid,
           channel_int: r.channel_int,
           title: String(sn?.title || "").slice(0,200) || "[untitled]",
-          published_at: toUnixSeconds(sn?.publishedAt || null) || 0
+          published_at: toUnixSeconds(sn?.publishedAt || null) || 0,
+          channel_language_code: r.language_code || ""
         });
       }
 
@@ -835,7 +887,7 @@ async function catchUpFeeds(env, maxChannels=5){
 
   async function loadRows(fromId){
     return env.DB.prepare(`
-      SELECT id, channel_id
+      SELECT id, channel_id, language_code
       FROM channels
       WHERE is_active=1 AND id>?
       ORDER BY id ASC
@@ -875,7 +927,8 @@ async function catchUpFeeds(env, maxChannels=5){
             vid,
             channel_int: ch.id,
             title: String(e.title || "").slice(0, 200) || "[untitled]",
-            published_at: e.published_at || 0
+            published_at: e.published_at || 0,
+            channel_language_code: ch.language_code || ""
           });
         }
 

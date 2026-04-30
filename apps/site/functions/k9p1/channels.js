@@ -21,6 +21,9 @@ export async function onRequest({ env, request }) {
              c.branding_default_language,
              c.branding_country,
              c.branding_keywords,
+             c.language_code,
+             c.language_source,
+             c.languages_json,
              c.channel_meta_fetched_at,
              c.channel_meta_error,
              s.status AS websub_status,
@@ -83,6 +86,11 @@ export async function onRequest({ env, request }) {
       DELETE FROM channel_backfill
       WHERE channel_int = ?
     `).bind(channel_int).run();
+
+    try { await env.DB.prepare(`
+      DELETE FROM channel_languages
+      WHERE channel_int = ?
+    `).bind(channel_int).run(); } catch (_) {}
 
     const delChannel = await env.DB.prepare(`
       DELETE FROM channels

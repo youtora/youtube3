@@ -1,4 +1,5 @@
 import { getDB } from "../_db.js";
+import { normalizePublicLang } from "../_shared/language.js";
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
@@ -17,6 +18,7 @@ export async function onRequest({ env, request }) {
   const url = new URL(request.url);
   const type = normalizeTagType((url.searchParams.get("type") || "tag").trim().toLowerCase());
   const limit = intParam(url, "limit", 200, 1, 300);
+  const lang = normalizePublicLang(url.searchParams.get("lang") || "he", "he");
   const offset = intParam(url, "offset", 0, 0, 1000000);
 
   const res = await env.DB.prepare(`
@@ -29,10 +31,11 @@ export async function onRequest({ env, request }) {
     JOIN videos AS v
       ON v.id = t.video_rowid
     WHERE t.tag_type = ?
+      AND v.language_code = ?
     GROUP BY t.tag_norm
     ORDER BY video_count DESC, latest_published_at DESC, t.tag_norm ASC
     LIMIT ? OFFSET ?
-  `).bind(type, limit, offset).all();
+  `).bind(type, lang, limit, offset).all();
 
   const rows = res.results || [];
   const results = rows.map(row => ({
@@ -46,6 +49,7 @@ export async function onRequest({ env, request }) {
     {
       results,
       type,
+      lang,
       limit,
       offset,
       next_offset: rows.length >= limit ? offset + rows.length : null

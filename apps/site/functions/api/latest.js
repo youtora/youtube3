@@ -1,4 +1,6 @@
 import { getDB } from "../_db.js";
+import { normalizePublicLang } from "../_shared/language.js";
+
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
@@ -26,116 +28,8 @@ function parseCursor(raw) {
   return { p, id };
 }
 
-export async function onRequest({ env, request }) {
-  env.DB = getDB(env);
-  const url = new URL(request.url);
-
-  const limit = intParam(url, "limit", 24, 1, 50);
-
-  const kindRaw = (url.searchParams.get("kind") || "").trim().toUpperCase();
-  const kind = (kindRaw === "S" || kindRaw === "L") ? kindRaw : null;
-
-  const { p: cursorP, id: cursorId } = parseCursor(
-    url.searchParams.get("cursor") || ""
-  );
-
-  let rows;
-
-  if (kind) {
-    rows =
-      (cursorP !== null && cursorId !== null)
-        ? await env.DB.prepare(`
-            SELECT
-              v.id,
-              v.video_id,
-              v.title,
-              v.published_at,
-              v.video_kind,
-              v.duration_sec,
-              v.view_count,
-              v.like_count,
-              v.comment_count,
-              c.channel_id,
-              c.title AS channel_title,
-              c.thumbnail_url AS channel_thumbnail_url
-            FROM videos AS v INDEXED BY idx_videos_kind_latest_cover
-            JOIN channels AS c
-              ON c.id = v.channel_int
-            WHERE v.video_kind = ?
-              AND (v.published_at, v.id) < (?, ?)
-            ORDER BY v.published_at DESC, v.id DESC
-            LIMIT ?
-          `).bind(kind, cursorP, cursorId, limit).all()
-        : await env.DB.prepare(`
-            SELECT
-              v.id,
-              v.video_id,
-              v.title,
-              v.published_at,
-              v.video_kind,
-              v.duration_sec,
-              v.view_count,
-              v.like_count,
-              v.comment_count,
-              c.channel_id,
-              c.title AS channel_title,
-              c.thumbnail_url AS channel_thumbnail_url
-            FROM videos AS v INDEXED BY idx_videos_kind_latest_cover
-            JOIN channels AS c
-              ON c.id = v.channel_int
-            WHERE v.video_kind = ?
-            ORDER BY v.published_at DESC, v.id DESC
-            LIMIT ?
-          `).bind(kind, limit).all();
-  } else {
-    rows =
-      (cursorP !== null && cursorId !== null)
-        ? await env.DB.prepare(`
-            SELECT
-              v.id,
-              v.video_id,
-              v.title,
-              v.published_at,
-              v.video_kind,
-              v.duration_sec,
-              v.view_count,
-              v.like_count,
-              v.comment_count,
-              c.channel_id,
-              c.title AS channel_title,
-              c.thumbnail_url AS channel_thumbnail_url
-            FROM videos AS v INDEXED BY idx_videos_latest_cover
-            JOIN channels AS c
-              ON c.id = v.channel_int
-            WHERE (v.published_at, v.id) < (?, ?)
-            ORDER BY v.published_at DESC, v.id DESC
-            LIMIT ?
-          `).bind(cursorP, cursorId, limit).all()
-        : await env.DB.prepare(`
-            SELECT
-              v.id,
-              v.video_id,
-              v.title,
-              v.published_at,
-              v.video_kind,
-              v.duration_sec,
-              v.view_count,
-              v.like_count,
-              v.comment_count,
-              c.channel_id,
-              c.title AS channel_title,
-              c.thumbnail_url AS channel_thumbnail_url
-            FROM videos AS v INDEXED BY idx_videos_latest_cover
-            JOIN channels AS c
-              ON c.id = v.channel_int
-            ORDER BY v.published_at DESC, v.id DESC
-            LIMIT ?
-          `).bind(limit).all();
-  }
-
-  const vrows = rows.results || [];
-
-  const videos = vrows.map(r => ({
+function mapVideoRow(r) {
+  return {
     video_id: r.video_id,
     title: r.title,
     published_at: r.published_at,
@@ -144,10 +38,72 @@ export async function onRequest({ env, request }) {
     view_count: r.view_count ?? null,
     like_count: r.like_count ?? null,
     comment_count: r.comment_count ?? null,
+    language_code: r.language_code || "",
+    language_source: r.language_source || "",
     channel_id: r.channel_id || null,
     channel_title: r.channel_title || null,
     channel_thumbnail_url: r.channel_thumbnail_url || null
-  }));
+  };
+}
+
+function selectSql({ kind, cursor }) {
+  const cursorSql = cursor ? "AND (v.published_at, v.id) < (?, ?)" : "";
+  const kindSql = kind ? "AND v.video_kind = ?" : "";
+  const indexName = kind ? "idx_videos_kind_lang_latest_cover" : "idx_videos_lang_latest_cover";
+
+  return `
+    SELECT
+      v.id,
+      v.video_id,
+      v.title,
+      v.published_at,
+      v.video_kind,
+      v.duration_sec,
+      v.view_count,
+      v.like_count,
+      v.comment_count,
+      v.language_code,
+      v.language_source,
+      c.channel_id,
+      c.title AS channel_title,
+      c.thumbnail_url AS channel_thumbnail_url
+    FROM videos AS v INDEXED BY ${indexName}
+    JOIN channels AS c
+      ON c.id = v.channel_int
+    WHERE v.language_code = ?
+      ${kindSql}
+      ${cursorSql}
+    ORDER BY v.published_at DESC, v.id DESC
+    LIMIT ?
+  `;
+}
+
+export async function onRequest({ env, request }) {
+  env.DB = getDB(env);
+  const url = new URL(request.url);
+
+  const limit = intParam(url, "limit", 24, 1, 50);
+  const lang = normalizePublicLang(url.searchParams.get("lang") || "he", "he");
+
+  const kindRaw = (url.searchParams.get("kind") || "").trim().toUpperCase();
+  const kind = (kindRaw === "S" || kindRaw === "L") ? kindRaw : null;
+
+  const { p: cursorP, id: cursorId } = parseCursor(
+    url.searchParams.get("cursor") || ""
+  );
+  const hasCursor = cursorP !== null && cursorId !== null;
+
+  const binds = [lang];
+  if (kind) binds.push(kind);
+  if (hasCursor) binds.push(cursorP, cursorId);
+  binds.push(limit);
+
+  const rows = await env.DB.prepare(selectSql({ kind, cursor: hasCursor }))
+    .bind(...binds)
+    .all();
+
+  const vrows = rows.results || [];
+  const videos = vrows.map(mapVideoRow);
 
   const last = vrows[vrows.length - 1];
   const next_cursor =
@@ -156,7 +112,7 @@ export async function onRequest({ env, request }) {
       : null;
 
   return Response.json(
-    { videos, next_cursor },
+    { videos, next_cursor, lang },
     { headers: { "cache-control": "public, max-age=60" } }
   );
 }

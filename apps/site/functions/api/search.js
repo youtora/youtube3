@@ -1,4 +1,5 @@
 import { getDB } from "../_db.js";
+import { normalizePublicLang } from "../_shared/language.js";
 // functions/api/search.js
 // Default: fast title-only FTS over video_fts.
 // Optional future mode: ?scope=all searches title + description/tags/hashtags.
@@ -27,6 +28,7 @@ export async function onRequest({ env, request }) {
   const cleaned = cleanQuery(qRaw);
   const match = toFtsMatch(cleaned);
   const scope = (url.searchParams.get("scope") || "title").trim().toLowerCase() === "all" ? "all" : "title";
+  const lang = normalizePublicLang(url.searchParams.get("lang") || "he", "he");
 
   const limit = 50;
 
@@ -76,10 +78,11 @@ export async function onRequest({ env, request }) {
             ON v.id = h.video_rowid
           JOIN channels AS c
             ON c.id = v.channel_int
-          WHERE v.id < ?
+          WHERE v.language_code = ?
+            AND v.id < ?
           ORDER BY v.id DESC
           LIMIT ?
-        `).bind(match, match, cursor, limit).all()
+        `).bind(match, match, lang, cursor, limit).all()
       : await env.DB.prepare(`
           WITH hits AS (
             SELECT rowid AS video_rowid
@@ -112,9 +115,10 @@ export async function onRequest({ env, request }) {
             ON v.id = h.video_rowid
           JOIN channels AS c
             ON c.id = v.channel_int
+          WHERE v.language_code = ?
           ORDER BY v.id DESC
           LIMIT ?
-        `).bind(match, match, limit).all();
+        `).bind(match, match, lang, limit).all();
   } else {
     vids = (Number.isFinite(cursor) && cursor > 0)
       ? await env.DB.prepare(`
@@ -137,10 +141,11 @@ export async function onRequest({ env, request }) {
           JOIN channels AS c
             ON c.id = v.channel_int
           WHERE video_fts MATCH ?
+            AND v.language_code = ?
             AND f.rowid < ?
           ORDER BY f.rowid DESC
           LIMIT ?
-        `).bind(match, cursor, limit).all()
+        `).bind(match, lang, cursor, limit).all()
       : await env.DB.prepare(`
           SELECT
             v.id,
@@ -161,9 +166,10 @@ export async function onRequest({ env, request }) {
           JOIN channels AS c
             ON c.id = v.channel_int
           WHERE video_fts MATCH ?
+            AND v.language_code = ?
           ORDER BY f.rowid DESC
           LIMIT ?
-        `).bind(match, limit).all();
+        `).bind(match, lang, limit).all();
   }
 
   const rows = vids.results || [];
@@ -189,7 +195,7 @@ export async function onRequest({ env, request }) {
       : null;
 
   return Response.json(
-    { results, next_cursor, scope },
+    { results, next_cursor, scope, lang },
     { headers: { "cache-control": "public, max-age=30" } }
   );
 }

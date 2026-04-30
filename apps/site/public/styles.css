@@ -1750,3 +1750,38 @@ a:hover{text-decoration:none}
   border-color:#c8d7ff;
   text-decoration:none;
 }
+
+/* ===== Language filter ===== */
+.languageFilter{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px;
+  margin:12px 0 8px;
+}
+.languageFilterLabel{
+  font-size:13px;
+  color:#606060;
+  font-weight:800;
+}
+.languagePill{
+  display:inline-flex;
+  align-items:center;
+  min-height:32px;
+  padding:6px 12px;
+  border:1px solid #ddd;
+  border-radius:999px;
+  background:#fff;
+  color:#222;
+  text-decoration:none;
+  font-size:13px;
+  font-weight:800;
+}
+.languagePill:hover{
+  background:#f5f5f5;
+}
+.languagePill.active{
+  background:#111;
+  color:#fff;
+  border-color:#111;
+}

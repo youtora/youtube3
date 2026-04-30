@@ -1,5 +1,6 @@
 import { getDB } from "../_db.js";
-import { fetchVideoMeta as fetchFullVideoMeta, videoDetailsStmts } from "../_shared/video-meta.js";
+import { fetchVideoMeta as fetchFullVideoMeta, videoDetailsStmts, inferVideoLanguage } from "../_shared/video-meta.js";
+import { buildChannelLanguage, channelLanguageStmts } from "../_shared/language.js";
 
 function unauthorized() { return new Response("unauthorized", { status: 401 }); }
 function nowSec() { return Math.floor(Date.now() / 1000); }
@@ -28,6 +29,7 @@ function buildChannelMeta(item) {
   const brandingChannel = item?.brandingSettings?.channel || {};
   const brandingImage = item?.brandingSettings?.image || {};
   const topics = item?.topicDetails || {};
+  const langMeta = buildChannelLanguage({ snippet: sn, brandingChannel, localizations: item?.localizations || {} });
 
   return {
     title: sn.title || null,
@@ -57,6 +59,10 @@ function buildChannelMeta(item) {
     topic_categories_json: safeJson(topics.topicCategories || [], []),
     topic_ids_json: safeJson(topics.topicIds || [], []),
     localizations_json: safeJson(item?.localizations || {}, {}),
+    language_code: langMeta.language_code,
+    language_source: langMeta.language_source,
+    languages_json: langMeta.languages_json,
+    languages: langMeta.languages,
   };
 }
 
@@ -328,7 +334,7 @@ async function importPlaylistsForChannel({ env, DB, channel_int, channel_id, max
   return { ok: true, imported };
 }
 
-async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, max_pages = 2 }) {
+async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, channel_language_code = "", max_pages = 2 }) {
   if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0, next_page_token: null, done: 0 };
   if (!uploads_playlist_id) return { ok: false, reason: "missing uploads playlist", imported: 0, next_page_token: null, done: 1 };
 
@@ -363,14 +369,15 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
       const like_count = meta.like_count ?? null;
       const comment_count = meta.comment_count ?? null;
       const stats_fetched_at = metaMap.has(vid) ? now : null;
+      const lang = inferVideoLanguage(meta, channel_language_code);
 
       stmts.push(DB.prepare(`
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          updated_at
+          language_code, language_source, updated_at
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int=excluded.channel_int,
           title=excluded.title,
@@ -381,11 +388,13 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
           like_count=CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
           comment_count=CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
           stats_fetched_at=CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
+          language_code=CASE WHEN excluded.language_code IS NOT NULL AND excluded.language_code <> '' THEN excluded.language_code ELSE videos.language_code END,
+          language_source=CASE WHEN excluded.language_source IS NOT NULL AND excluded.language_source <> '' THEN excluded.language_source ELSE videos.language_source END,
           updated_at=excluded.updated_at
       `).bind(
         vid, channel_int, title, published_at,
         video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-        now
+        lang.language_code, lang.language_source, now
       ));
 
       if (metaMap.has(vid)) {
@@ -530,9 +539,10 @@ export async function onRequest({ env, request }) {
       branding_title, branding_description, branding_keywords,
       branding_default_language, branding_country, unsubscribed_trailer,
       topic_categories_json, topic_ids_json, localizations_json,
-      channel_meta_fetched_at, channel_meta_error
+      channel_meta_fetched_at, channel_meta_error,
+      language_code, language_source, languages_json
     )
-    VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(channel_id) DO UPDATE SET
       title = COALESCE(excluded.title, channels.title),
       thumbnail_url = COALESCE(excluded.thumbnail_url, channels.thumbnail_url),
@@ -557,6 +567,9 @@ export async function onRequest({ env, request }) {
       localizations_json = excluded.localizations_json,
       channel_meta_fetched_at = excluded.channel_meta_fetched_at,
       channel_meta_error = excluded.channel_meta_error
+      , language_code = excluded.language_code
+      , language_source = excluded.language_source
+      , languages_json = excluded.languages_json
   `).bind(
     channel_id,
     title,
@@ -581,12 +594,20 @@ export async function onRequest({ env, request }) {
     meta.topic_ids_json || "[]",
     meta.localizations_json || "{}",
     t,
-    metaError
+    metaError,
+    meta.language_code || "",
+    meta.language_source || "",
+    meta.languages_json || "[]"
   ).run();
 
   const ch = await DB.prepare(`SELECT id FROM channels WHERE channel_id=?`).bind(channel_id).first();
   if (!ch) return new Response("failed to load channel row", { status: 500 });
   const channel_int = ch.id;
+
+  if (meta.languages_json) {
+    const langStmts = channelLanguageStmts(DB, channel_int, meta.languages || meta.languages_json, meta.language_source || "detected");
+    if (langStmts.length) await DB.batch(langStmts);
+  }
 
   await DB.prepare(`
     INSERT INTO channel_backfill(channel_int, uploads_playlist_id, next_page_token, done, imported_count, updated_at)
@@ -631,6 +652,7 @@ export async function onRequest({ env, request }) {
         DB,
         channel_int,
         uploads_playlist_id: uploads,
+        channel_language_code: meta.language_code || "",
         max_pages: videos_pages,
       });
       if (!videos?.ok) warnings.push({ step: "videos", detail: videos });
@@ -677,6 +699,9 @@ export async function onRequest({ env, request }) {
       has_branding_keywords: Boolean(meta.branding_keywords),
       topic_categories_count: JSON.parse(meta.topic_categories_json || "[]").length,
       localizations_count: Object.keys(JSON.parse(meta.localizations_json || "{}")).length,
+      language_code: meta.language_code || "",
+      language_source: meta.language_source || "",
+      languages: meta.languages || [],
     },
     websub,
     playlists,
