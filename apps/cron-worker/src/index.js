@@ -505,6 +505,41 @@ function inferVideoLanguage(meta={}, fallbackChannelLang=""){
   return { language_code: "unknown", language_source: "unknown" };
 }
 
+function channelVideoLanguageStmts(env, channel_int, language_code, source="video"){
+  const lang = normalizeLangCode(language_code);
+  if(!channel_int || !isSupportedLang(lang)) return [];
+
+  const sourceText = source ? `video:${source}` : "video";
+  const oneLangJson = JSON.stringify([lang]);
+  const langJsonValue = JSON.stringify(lang);
+  const langLike = `%"${lang}"%`;
+
+  return [
+    env.DB.prepare(`
+      INSERT OR IGNORE INTO channel_languages(channel_int, language_code, source)
+      VALUES(?, ?, ?)
+    `).bind(channel_int, lang, sourceText),
+    env.DB.prepare(`
+      UPDATE channels
+      SET
+        language_code = CASE
+          WHEN COALESCE(language_code, '') = '' THEN ?
+          ELSE language_code
+        END,
+        language_source = CASE
+          WHEN COALESCE(language_source, '') = '' THEN ?
+          ELSE language_source
+        END,
+        languages_json = CASE
+          WHEN COALESCE(languages_json, '') = '' OR languages_json = '[]' THEN ?
+          WHEN languages_json LIKE ? THEN languages_json
+          ELSE substr(languages_json, 1, length(languages_json) - 1) || ',' || ? || ']'
+        END
+      WHERE id = ?
+    `).bind(lang, sourceText, oneLangJson, langLike, langJsonValue, channel_int)
+  ];
+}
+
 
 async function fetchChannelUploadsPlaylistId(env, channelId){
   const u = new URL("https://www.googleapis.com/youtube/v3/channels");
@@ -625,6 +660,8 @@ function videoUpsertAndMetaStmts(env, rows, ts){
         ts
       ));
 
+      stmts.push(...channelVideoLanguageStmts(env, row.channel_int, lang.language_code, lang.language_source));
+
       if(meta){
         stmts.push(...videoDetailsStmts(env, vid, meta, ts));
       }
@@ -732,6 +769,9 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
         lang.language_source,
         ts
       ).run();
+
+      const langStmts = channelVideoLanguageStmts(env, row.channel_int, lang.language_code, lang.language_source);
+      if (langStmts.length) await env.DB.batch(langStmts);
 
       videoRows++;
     } catch (e) {
