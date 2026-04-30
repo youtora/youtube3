@@ -1121,6 +1121,50 @@ async function tagLoadMore(token, value, type="tag"){
 }
 
 
+
+function topicLabel(topic){
+  const raw = String(topic || "").trim();
+  if (!raw) return "";
+  const last = raw.split("/").pop() || raw;
+  try {
+    return decodeURIComponent(last).replace(/_/g, " ");
+  } catch (_) {
+    return last.replace(/_/g, " ");
+  }
+}
+
+function parseBrandingKeywords(text){
+  const s = String(text || "").trim();
+  if (!s) return [];
+  const out = [];
+  const re = /"([^"]+)"|'([^']+)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(s)) && out.length < 18) {
+    const value = (m[1] || m[2] || m[3] || "").trim();
+    if (value && !out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
+function renderChannelInfoBox(ch){
+  const description = (ch.localized_description || ch.description || "").trim();
+  const keywords = parseBrandingKeywords(ch.branding?.keywords || "");
+  const topics = Array.isArray(ch.topic_categories) ? ch.topic_categories.map(topicLabel).filter(Boolean) : [];
+  const lang = ch.default_language || ch.branding?.default_language || "";
+  const country = ch.country || ch.branding?.country || "";
+
+  if (!description && !keywords.length && !topics.length && !lang && !country) return "";
+
+  return `
+    <div class="channelInfoBox">
+      ${description ? `<div class="channelDescription">${esc(description)}</div>` : ``}
+      ${(lang || country) ? `<div class="channelMetaLine">${lang ? `<span>שפה: ${esc(lang)}</span>` : ``}${country ? `<span>מדינה: ${esc(country)}</span>` : ``}</div>` : ``}
+      ${topics.length ? `<div class="channelChipRow"><span class="channelChipLabel">קטגוריות:</span>${topics.map(x => `<span class="channelChip">${esc(x)}</span>`).join("")}</div>` : ``}
+      ${keywords.length ? `<div class="channelChipRow"><span class="channelChipLabel">מילות מפתח:</span>${keywords.map(x => `<span class="channelChip">${esc(x)}</span>`).join("")}</div>` : ``}
+    </div>
+  `;
+}
+
 /* ---------- CHANNEL: infinite load videos ---------- */
 let channelVideosState = { key: "", cursor: null, loading: false, done: false, token: 0 };
 
@@ -1148,19 +1192,21 @@ async function pageChannel(channel_id, tab){
   const tabLabel = channelTabLabel(activeTab);
   applyRouteMeta({
     title: `${ch.title || ch.channel_id} | ${tabLabel} | Youtora`,
-    description: `${tabLabel} של הערוץ ${ch.title || ch.channel_id} ב־Youtora.`,
+    description: (ch.localized_description || ch.description || `${tabLabel} של הערוץ ${ch.title || ch.channel_id} ב־Youtora.`).slice(0, 155),
     canonical: `/${encodeURIComponent(ch.channel_id)}/${activeTab}`,
-    image: ch.thumbnail_url || '/default-og.png',
+    image: ch.banner_url || ch.thumbnail_url || '/default-og.png',
     jsonLd: {
       '@context': 'https://schema.org',
       '@type': 'CollectionPage',
       name: `${ch.title || ch.channel_id} - ${tabLabel}`,
-      description: `${tabLabel} של הערוץ ${ch.title || ch.channel_id} ב־Youtora.`,
+      description: ch.localized_description || ch.description || `${tabLabel} של הערוץ ${ch.title || ch.channel_id} ב־Youtora.`,
       url: absoluteUrl(`/${encodeURIComponent(ch.channel_id)}/${activeTab}`)
     }
   });
 
   const header = `
+    ${ch.banner_url ? `<div class="channelBanner"><img loading="lazy" decoding="async" src="${esc(ch.banner_url)}" onerror="this.closest(\'.channelBanner\').style.display=\'none\'"></div>` : ``}
+
     <div class="avatarRow">
       ${ch.thumbnail_url ? `<img class="avatar" style="width:64px;height:64px" loading="lazy" decoding="async" src="${esc(ch.thumbnail_url)}" onerror="this.style.display='none'">`
                          : `<div class="avatar" style="width:64px;height:64px"></div>`}
@@ -1173,6 +1219,8 @@ async function pageChannel(channel_id, tab){
     <div class="btnRow">
       <a class="btn" target="_blank" rel="noreferrer" href="https://www.youtube.com/channel/${encodeURIComponent(ch.channel_id)}">פתח ביוטיוב</a>
     </div>
+
+    ${renderChannelInfoBox(ch)}
 
     <div class="tabs">
       <a class="tab ${activeTab==="videos"?"active":""}" href="/${encodeURIComponent(channel_id)}/videos" data-link>סרטונים</a>
