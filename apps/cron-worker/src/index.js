@@ -226,6 +226,17 @@ function classifyVideoItem(it){
   return "";
 }
 
+function normalizeVideoKindForDb(value){
+  const kind = String(value || "").trim().toUpperCase();
+  return kind === "S" || kind === "L" ? kind : null;
+}
+
+function intFromEnv(value, fallback, min, max){
+  const n = parseInt(String(value ?? ""), 10);
+  if(!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
 function extractDurationSec(it){
   const sec = parseIsoDurationSec(it?.contentDetails?.duration || "");
   return Number.isFinite(sec) && sec > 0 ? sec : null;
@@ -607,6 +618,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
       const title = (meta?.title || row.title || "[untitled]").slice(0, 200);
       const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
       const lang = inferVideoLanguage(meta || {}, row.channel_language_code || "");
+      const videoKind = normalizeVideoKindForDb(meta?.video_kind);
 
       // vid כבר נוקה למעלה, לכן משתמשים ב-VALUES רגיל.
       // ב-Turso/libSQL זה בטוח יותר מ-INSERT ... SELECT ... WHERE ... ON CONFLICT.
@@ -650,7 +662,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
         row.channel_int,
         title,
         publishedAt,
-        meta?.video_kind ?? null,
+        videoKind,
         meta?.duration_sec ?? null,
         meta?.view_count ?? null,
         meta?.like_count ?? null,
@@ -735,7 +747,8 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     const meta = metaMap.get(vid) || null;
     const title = (meta?.title || row.title || "[untitled]").slice(0, 200);
     const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
-      const lang = inferVideoLanguage(meta || {}, row.channel_language_code || "");
+    const lang = inferVideoLanguage(meta || {}, row.channel_language_code || "");
+    const videoKind = normalizeVideoKindForDb(meta?.video_kind);
 
     try {
       await env.DB.prepare(`
@@ -763,7 +776,7 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
         row.channel_int,
         title,
         publishedAt,
-        meta?.video_kind ?? null,
+        videoKind,
         meta?.duration_sec ?? null,
         meta?.view_count ?? null,
         meta?.like_count ?? null,
@@ -810,8 +823,10 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
 }
 
 
-async function backfillSome(env, maxCalls=20){
+async function backfillSome(env, maxCalls=1){
   if(!env.YT_API_KEY) return;
+
+  const pageSize = intFromEnv(env.CRON_BACKFILL_PAGE_SIZE, 5, 1, 10);
 
   const rows = await env.DB.prepare(`
     SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token, c.language_code, c.netfree_default_status
@@ -839,8 +854,8 @@ async function backfillSome(env, maxCalls=20){
       u.searchParams.set("part","snippet,contentDetails");
       u.searchParams.set("playlistId", playlistId);
       // כל סרטון שנכנס דרך הקרון מקבל metadata מיד.
-      // נשארים בכמות קטנה כדי לא לעבור את מגבלת subrequests של Cloudflare/Turso.
-      u.searchParams.set("maxResults","20");
+      // שומרים על דף קטן כדי לא לעבור את מגבלת subrequests של Cloudflare/Turso.
+      u.searchParams.set("maxResults", String(pageSize));
       if(r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
       u.searchParams.set("key", env.YT_API_KEY);
 
@@ -1135,6 +1150,26 @@ async function refreshPlaylistsMonthly(env, perRun=5, maxPages=10){
 }
 
 export default {
+  async fetch(request, env, ctx){
+    env.DB = createDB(env);
+
+    const url = new URL(request.url);
+    if(url.pathname === "/" || url.pathname === "/health"){
+      return new Response(JSON.stringify({
+        ok: true,
+        service: "youtube4-cron",
+        message: "Cron worker is deployed. Scheduled jobs run from Cloudflare cron."
+      }, null, 2), {
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store"
+        }
+      });
+    }
+
+    return new Response("Not found", { status: 404 });
+  },
+
   async scheduled(event, env, ctx){
     env.DB = createDB(env);
     console.log("youtube4-cron v7 direct-video-upsert 2026-04-29");
@@ -1151,7 +1186,7 @@ export default {
         console.log(`catchUpFeeds error`, e);
       }
 
-      try { await backfillSome(env, 2); }
+      try { await backfillSome(env, intFromEnv(env.CRON_BACKFILL_CHANNELS, 1, 1, 2)); }
       catch (e) {
         if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
         console.log(`backfillSome error`, e);
