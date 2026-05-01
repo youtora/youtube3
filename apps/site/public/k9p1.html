@@ -65,14 +65,15 @@ https://www.youtube.com/c/SomeChannel"
 
   <h2>בדיקת נטפרי לסרטונים מוסתרים</h2>
   <p style="color:#555;line-height:1.6;margin-top:0">
-    כאן רואים את הסרטונים שנכנסו מערוצים מעורבים. בשלב הזה אפשר לסמן ידנית פתוח/חסום/שגיאה.
-    בשלב הבא נוסיף סקריפט מקומי שיבדוק אוטומטית מהמחשב שלך.
+    ברירת המחדל מציגה רק סרטונים שבאמת הגיע זמנם לבדיקה: קודם סרטונים חדשים שלא בדקת ועבר שבוע מאז שנכנסו למסד,
+    ורק אחר כך סרטונים שסומנו שנטפרי עדיין לא בדקו והגיע זמן הבדיקה החוזרת שלהם.
   </p>
 
   <div class="nf-toolbar">
     <label>סטטוס
       <select id="nf_status">
-        <option value="pending" selected>ממתינים לבדיקה אצלך</option>
+        <option value="ready" selected>מוכן לבדיקה לפי עדיפות</option>
+        <option value="pending">כל הממתינים, כולל פחות משבוע</option>
         <option value="netfree_unchecked">נטפרי עדיין לא בדקו / לבדיקה חוזרת</option>
         <option value="open">פתוחים</option>
         <option value="blocked">נבדקו ונחסמו</option>
@@ -88,10 +89,10 @@ https://www.youtube.com/c/SomeChannel"
 
     <label>סדר
       <select id="nf_sort">
-        <option value="popular" selected>פופולריים תחילה</option>
+        <option value="priority" selected>לפי עדיפות בדיקה</option>
+        <option value="checked_oldest">הכי הרבה זמן מאז בדיקה</option>
         <option value="newest">חדשים תחילה</option>
         <option value="oldest">ישנים תחילה</option>
-        <option value="retry">בדיקה חוזרת תחילה</option>
       </select>
     </label>
 
@@ -376,7 +377,7 @@ https://www.youtube.com/c/SomeChannel"
     const rows = counts?.by_status || [];
     const map = new Map(rows.map((r)=>[Number(r.netfree_status), Number(r.count || 0)]));
     const items = [
-      [0, "ממתינים"],
+      [0, "ממתינים סה״כ"],
       [5, "נטפרי לא בדקו"],
       [1, "פתוחים"],
       [2, "נחסמו"],
@@ -391,14 +392,20 @@ https://www.youtube.com/c/SomeChannel"
       </div>
     `).join("");
 
-    if(Number(counts?.recheck_due || 0) > 0){
-      document.getElementById("nf_stats").innerHTML += `
-        <div class="nf-stat">
-          <span>מוכנים לבדיקה חוזרת</span>
-          <b>${Number(counts.recheck_due || 0)}</b>
-        </div>
-      `;
-    }
+    document.getElementById("nf_stats").innerHTML += `
+      <div class="nf-stat">
+        <span>ממתינים שעבר שבוע</span>
+        <b>${Number(counts?.pending_ready_after_week || 0)}</b>
+      </div>
+      <div class="nf-stat">
+        <span>ממתינים פחות משבוע</span>
+        <b>${Number(counts?.pending_too_new || 0)}</b>
+      </div>
+      <div class="nf-stat">
+        <span>מוכנים לבדיקה חוזרת</span>
+        <b>${Number(counts?.recheck_due || 0)}</b>
+      </div>
+    `;
   }
 
   function renderNetfreeQueue(items){
@@ -443,6 +450,7 @@ https://www.youtube.com/c/SomeChannel"
               <td>${nfStatusLabel(v.netfree_status)}</td>
               <td>
                 <div>ניסיונות: ${Number(v.netfree_check_attempts || 0)}</div>
+                <div style="font-size:12px;color:#666">${v.netfree_discovered_at ? `נכנס לתור: ${fmtTs(v.netfree_discovered_at)}` : ""}</div>
                 <div style="font-size:12px;color:#666">${v.netfree_checked_at ? `נבדק: ${fmtTs(v.netfree_checked_at)}` : "עדיין לא נבדק"}</div>
                 ${v.netfree_recheck_after ? `<div style="font-size:12px;color:#666">בדיקה חוזרת: ${fmtTs(v.netfree_recheck_after)}</div>` : ``}
                 ${v.netfree_last_error ? `<div style="font-size:12px;color:#b00">${esc(v.netfree_last_error)}</div>` : ``}
@@ -468,7 +476,7 @@ https://www.youtube.com/c/SomeChannel"
     const box = document.getElementById("nf_queue");
     const status = document.getElementById("nf_status").value;
     const limit = document.getElementById("nf_limit").value || "30";
-    const sort = document.getElementById("nf_sort").value || "popular";
+    const sort = document.getElementById("nf_sort").value || "priority";
     const q = document.getElementById("nf_q").value.trim();
     const params = new URLSearchParams({ status, limit, sort });
 

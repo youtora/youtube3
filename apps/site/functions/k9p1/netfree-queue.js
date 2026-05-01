@@ -20,6 +20,9 @@ function parsePositiveInt(value, fallback, min, max) {
 }
 
 const STATUS_MAP = {
+  ready: "ready",
+  due: "ready",
+  queue: "ready",
   pending: 0,
   open: 1,
   blocked: 2,
@@ -35,73 +38,108 @@ const STATUS_MAP = {
   חסום: 2,
 };
 
-function normalizeStatus(raw, fallback = "pending") {
+function normalizeStatus(raw, fallback = "ready") {
   const value = String(raw ?? fallback).trim().toLowerCase();
   if (value === "all") return { mode: "all", status: null };
+  if (value === "ready" || value === "due" || value === "queue") return { mode: "ready", status: null };
 
   if (/^[0-5]$/.test(value)) {
     return { mode: "single", status: Number(value) };
   }
 
   if (Object.prototype.hasOwnProperty.call(STATUS_MAP, value)) {
-    return { mode: "single", status: STATUS_MAP[value] };
+    const status = STATUS_MAP[value];
+    if (status === "ready") return { mode: "ready", status: null };
+    return { mode: "single", status };
   }
 
-  return { mode: "single", status: STATUS_MAP[fallback] };
+  return { mode: "ready", status: null };
 }
 
 function normalizeSort(raw) {
-  const value = String(raw || "popular").trim().toLowerCase();
-  if (["popular", "newest", "oldest", "retry"].includes(value)) return value;
-  return "popular";
+  const value = String(raw || "priority").trim().toLowerCase();
+  if (["priority", "newest", "oldest", "checked_oldest"].includes(value)) return value;
+  return "priority";
+}
+
+function discoveredExpr() {
+  return "COALESCE(v.netfree_discovered_at, v.updated_at, v.published_at, 0)";
+}
+
+function dueWhereSql() {
+  return `(
+    (
+      v.netfree_status = 0
+      AND COALESCE(v.netfree_checked_at, 0) = 0
+      AND ${discoveredExpr()} <= ?
+    )
+    OR (
+      v.netfree_status = 5
+      AND (
+        v.netfree_recheck_after IS NULL
+        OR v.netfree_recheck_after = 0
+        OR v.netfree_recheck_after <= ?
+      )
+    )
+  )`;
+}
+
+function priorityCaseSql() {
+  return `CASE
+      WHEN v.netfree_status = 0
+        AND COALESCE(v.netfree_checked_at, 0) = 0
+        AND ${discoveredExpr()} <= ? THEN 0
+      WHEN v.netfree_status = 5
+        AND (
+          v.netfree_recheck_after IS NULL
+          OR v.netfree_recheck_after = 0
+          OR v.netfree_recheck_after <= ?
+        ) THEN 1
+      WHEN v.netfree_status = 3 THEN 2
+      WHEN v.netfree_status = 2 THEN 3
+      WHEN v.netfree_status = 4 THEN 4
+      WHEN v.netfree_status = 1 THEN 5
+      ELSE 9
+    END`;
 }
 
 function orderBySql(sort) {
-  const statusPriority = `
-      CASE v.netfree_status
-        WHEN 0 THEN 0
-        WHEN 5 THEN 1
-        WHEN 3 THEN 2
-        WHEN 2 THEN 3
-        WHEN 4 THEN 4
-        WHEN 1 THEN 5
-        ELSE 9
-      END`;
+  const priorityCase = priorityCaseSql();
 
   if (sort === "newest") {
-    return `ORDER BY ${statusPriority}, v.published_at DESC, v.id DESC`;
+    return `ORDER BY ${priorityCase}, v.published_at DESC, v.id DESC`;
   }
 
   if (sort === "oldest") {
-    return `ORDER BY ${statusPriority}, v.published_at ASC, v.id ASC`;
+    return `ORDER BY ${priorityCase}, v.published_at ASC, v.id ASC`;
   }
 
-  if (sort === "retry") {
+  if (sort === "checked_oldest") {
     return `ORDER BY
-      ${statusPriority},
+      ${priorityCase},
+      COALESCE(v.netfree_checked_at, 0) ASC,
       COALESCE(v.netfree_recheck_after, 0) ASC,
-      v.netfree_check_attempts ASC,
-      COALESCE(v.view_count, 0) DESC,
       v.published_at DESC,
       v.id DESC`;
   }
 
   return `ORDER BY
-      ${statusPriority},
-      COALESCE(v.view_count, 0) DESC,
-      COALESCE(v.like_count, 0) DESC,
-      COALESCE(v.comment_count, 0) DESC,
+      ${priorityCase},
+      CASE WHEN v.netfree_status = 0 THEN ${discoveredExpr()} ELSE NULL END ASC,
+      CASE WHEN v.netfree_status = 5 THEN COALESCE(v.netfree_checked_at, 0) ELSE NULL END ASC,
+      CASE WHEN v.netfree_status = 5 THEN COALESCE(v.netfree_recheck_after, 0) ELSE NULL END ASC,
       v.published_at DESC,
       v.id DESC`;
 }
 
-function rowQuery(whereSql, sort = "popular") {
+function rowQuery(whereSql, sort = "priority") {
   return `
     SELECT
       v.id,
       v.video_id,
       v.title,
       v.published_at,
+      v.updated_at,
       v.video_kind,
       v.duration_sec,
       v.view_count,
@@ -109,6 +147,7 @@ function rowQuery(whereSql, sort = "popular") {
       v.comment_count,
       v.stats_fetched_at,
       v.netfree_status,
+      v.netfree_discovered_at,
       v.netfree_checked_at,
       v.netfree_recheck_after,
       v.netfree_check_attempts,
@@ -131,6 +170,7 @@ function rowQuery(whereSql, sort = "popular") {
 
 async function loadCounts(DB) {
   const t = nowSec();
+  const weekAgo = t - (7 * 86400);
 
   const counts = await DB.prepare(`
     SELECT netfree_status, COUNT(*) AS count
@@ -138,6 +178,22 @@ async function loadCounts(DB) {
     GROUP BY netfree_status
     ORDER BY netfree_status
   `).all();
+
+  const pendingReady = await DB.prepare(`
+    SELECT COUNT(*) AS count
+    FROM videos v
+    WHERE v.netfree_status = 0
+      AND COALESCE(v.netfree_checked_at, 0) = 0
+      AND ${discoveredExpr()} <= ?
+  `).bind(weekAgo).first();
+
+  const pendingTooNew = await DB.prepare(`
+    SELECT COUNT(*) AS count
+    FROM videos v
+    WHERE v.netfree_status = 0
+      AND COALESCE(v.netfree_checked_at, 0) = 0
+      AND ${discoveredExpr()} > ?
+  `).bind(weekAgo).first();
 
   const recheckDue = await DB.prepare(`
     SELECT COUNT(*) AS count
@@ -168,27 +224,47 @@ async function loadCounts(DB) {
 
   return {
     by_status: counts.results || [],
+    pending_ready_after_week: Number(pendingReady?.count || 0),
+    pending_too_new: Number(pendingTooNew?.count || 0),
     recheck_due: Number(recheckDue?.count || 0),
     pending_by_channel: byChannel.results || []
   };
 }
 
-async function listQueue({ DB, url }) {
-  const limit = parsePositiveInt(url.searchParams.get("limit"), 30, 1, 100);
-  const statusFilter = normalizeStatus(url.searchParams.get("status") || "pending", "pending");
-  const sort = normalizeSort(url.searchParams.get("sort"));
-  const channelId = String(url.searchParams.get("channel_id") || "").trim();
-  const q = String(url.searchParams.get("q") || "").trim();
-
-  const where = [];
-  const args = [];
+function addStatusWhere({ where, args, statusFilter, weekAgo, t }) {
+  if (statusFilter.mode === "ready") {
+    where.push(dueWhereSql());
+    args.push(weekAgo, t);
+    return;
+  }
 
   if (statusFilter.mode === "single") {
     where.push("v.netfree_status = ?");
     args.push(statusFilter.status);
-  } else {
-    where.push("v.netfree_status IN (0, 1, 2, 3, 4, 5)");
+    return;
   }
+
+  where.push("v.netfree_status IN (0, 1, 2, 3, 4, 5)");
+}
+
+function orderArgs(sort, weekAgo, t) {
+  // בכל ORDER BY יש priorityCaseSql פעם אחת.
+  return [weekAgo, t];
+}
+
+async function listQueue({ DB, url }) {
+  const limit = parsePositiveInt(url.searchParams.get("limit"), 30, 1, 100);
+  const statusFilter = normalizeStatus(url.searchParams.get("status") || "ready", "ready");
+  const sort = normalizeSort(url.searchParams.get("sort"));
+  const channelId = String(url.searchParams.get("channel_id") || "").trim();
+  const q = String(url.searchParams.get("q") || "").trim();
+  const t = nowSec();
+  const weekAgo = t - (7 * 86400);
+
+  const where = [];
+  const args = [];
+
+  addStatusWhere({ where, args, statusFilter, weekAgo, t });
 
   if (channelId) {
     where.push("c.channel_id = ?");
@@ -202,16 +278,17 @@ async function listQueue({ DB, url }) {
   }
 
   const rows = await DB.prepare(rowQuery(`WHERE ${where.join(" AND ")}`, sort))
-    .bind(...args, limit)
+    .bind(...args, ...orderArgs(sort, weekAgo, t), limit)
     .all();
 
   return json({
     ok: true,
-    status_filter: statusFilter.mode === "all" ? "all" : statusFilter.status,
+    status_filter: statusFilter.mode === "all" ? "all" : statusFilter.mode === "ready" ? "ready" : statusFilter.status,
     sort,
     limit,
     query: q,
     channel_id: channelId || null,
+    min_pending_age_days: 7,
     counts: await loadCounts(DB),
     items: rows.results || []
   });
@@ -223,6 +300,7 @@ async function claimQueue({ DB, body }) {
   const worker = String(body.worker || body.worker_id || "local-checker").trim().slice(0, 80) || "local-checker";
   const sort = normalizeSort(body.sort);
   const t = nowSec();
+  const weekAgo = t - (7 * 86400);
   const staleBefore = t - leaseSeconds;
 
   const rows = await DB.prepare(`
@@ -231,6 +309,7 @@ async function claimQueue({ DB, body }) {
       v.video_id,
       v.title,
       v.published_at,
+      v.updated_at,
       v.video_kind,
       v.duration_sec,
       v.view_count,
@@ -238,6 +317,7 @@ async function claimQueue({ DB, body }) {
       v.comment_count,
       v.stats_fetched_at,
       v.netfree_status,
+      v.netfree_discovered_at,
       v.netfree_checked_at,
       v.netfree_recheck_after,
       v.netfree_check_attempts,
@@ -252,17 +332,7 @@ async function claimQueue({ DB, body }) {
       c.show_in_public_channels
     FROM videos v
     JOIN channels c ON c.id = v.channel_int
-    WHERE (
-        v.netfree_status IN (0, 3)
-        OR (
-          v.netfree_status = 5
-          AND (
-            v.netfree_recheck_after IS NULL
-            OR v.netfree_recheck_after = 0
-            OR v.netfree_recheck_after <= ?
-          )
-        )
-      )
+    WHERE ${dueWhereSql()}
       AND (
         v.netfree_claimed_at IS NULL
         OR v.netfree_claimed_at = 0
@@ -270,7 +340,7 @@ async function claimQueue({ DB, body }) {
       )
     ${orderBySql(sort)}
     LIMIT ?
-  `).bind(t, staleBefore, limit).all();
+  `).bind(weekAgo, t, staleBefore, ...orderArgs(sort, weekAgo, t), limit).all();
 
   const items = rows.results || [];
   if (!items.length) {
@@ -295,7 +365,7 @@ async function claimQueue({ DB, body }) {
   const ids = items.map((item) => item.video_id);
   const placeholders = ids.map(() => "?").join(",");
   const updatedRows = await DB.prepare(rowQuery(`WHERE v.video_id IN (${placeholders})`, sort))
-    .bind(...ids, ids.length)
+    .bind(...ids, ...orderArgs(sort, weekAgo, t), ids.length)
     .all();
 
   return json({
@@ -304,6 +374,7 @@ async function claimQueue({ DB, body }) {
     worker,
     lease_seconds: leaseSeconds,
     sort,
+    min_pending_age_days: 7,
     items: updatedRows.results || items,
     counts: await loadCounts(DB)
   });

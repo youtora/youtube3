@@ -615,9 +615,9 @@ function videoUpsertAndMetaStmts(env, rows, ts){
           video_id, channel_int, title, published_at,
           video_kind, duration_sec,
           view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, netfree_status, updated_at
+          language_code, language_source, netfree_status, netfree_discovered_at, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int      = excluded.channel_int,
           title            = excluded.title,
@@ -659,6 +659,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
         lang.language_code,
         lang.language_source,
         row.netfree_default_status,
+        ts,
         ts
       ));
 
@@ -741,9 +742,9 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, netfree_status, updated_at
+          language_code, language_source, netfree_status, netfree_discovered_at, updated_at
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int=excluded.channel_int,
           title=excluded.title,
@@ -771,6 +772,7 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
         lang.language_code,
         lang.language_source,
         row.netfree_default_status,
+        ts,
         ts
       ).run();
 

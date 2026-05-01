@@ -390,9 +390,9 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, netfree_status, updated_at
+          language_code, language_source, netfree_status, netfree_discovered_at, updated_at
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int=excluded.channel_int,
           title=excluded.title,
@@ -409,7 +409,7 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
       `).bind(
         vid, channel_int, title, published_at,
         video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-        lang.language_code, lang.language_source, netfree_default_status, now
+        lang.language_code, lang.language_source, netfree_default_status, now, now
       ));
 
       stmts.push(...channelVideoLanguageStmts(DB, channel_int, lang.language_code, lang.language_source));

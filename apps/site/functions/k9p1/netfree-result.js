@@ -82,6 +82,27 @@ function getRecheckAfter(body, status, t) {
   return t + (days * 86400);
 }
 
+function checkedAtForStatus(status, t) {
+  // סטטוס 0 הוא “עדיין לא בדקתי”. לכן מחזירים אותו לתור נקי ולא מסמנים כבדיקה שבוצעה.
+  if (Number(status) === 0) return null;
+  return t;
+}
+
+function incrementAttemptsForStatus(status) {
+  // החזרה לסטטוס 0 היא איפוס תור, לא ניסיון בדיקה נוסף.
+  return Number(status) === 0 ? 0 : 1;
+}
+
+function defaultErrorForStatus(status) {
+  switch (Number(status)) {
+    case 2: return "נבדק ונחסם";
+    case 3: return "שגיאת בדיקה";
+    case 4: return "פרטי / הוסר / לא זמין";
+    case 5: return "נטפרי עדיין לא בדקו - לבדיקה חוזרת";
+    default: return "";
+  }
+}
+
 export async function onRequest({ env, request }) {
   try {
     if (request.method !== "POST") {
@@ -96,7 +117,9 @@ export async function onRequest({ env, request }) {
     const videoIds = normalizeVideoIds(body);
     const t = nowSec();
     const recheckAfter = getRecheckAfter(body, status, t);
-    const defaultError = Number(status) === 5 ? "נטפרי עדיין לא בדקו - לבדיקה חוזרת" : "";
+    const checkedAt = checkedAtForStatus(status, t);
+    const attemptAdd = incrementAttemptsForStatus(status);
+    const defaultError = defaultErrorForStatus(status);
     const error = String(body.error || body.netfree_last_error || defaultError).trim().slice(0, 500);
 
     if (status == null) {
@@ -110,14 +133,18 @@ export async function onRequest({ env, request }) {
     const stmts = videoIds.map((videoId) => DB.prepare(`
       UPDATE videos
       SET netfree_status = ?,
+          netfree_discovered_at = CASE
+            WHEN ? = 0 THEN ?
+            ELSE COALESCE(netfree_discovered_at, updated_at, published_at, ?)
+          END,
           netfree_checked_at = ?,
           netfree_recheck_after = ?,
-          netfree_check_attempts = netfree_check_attempts + 1,
+          netfree_check_attempts = netfree_check_attempts + ?,
           netfree_last_error = ?,
           netfree_claimed_at = NULL,
           netfree_claimed_by = ''
       WHERE video_id = ?
-    `).bind(status, t, recheckAfter, error, videoId));
+    `).bind(status, status, t, t, checkedAt, recheckAfter, attemptAdd, error, videoId));
 
     const result = await DB.batch(stmts);
 
@@ -127,10 +154,12 @@ export async function onRequest({ env, request }) {
         v.video_id,
         v.title,
         v.published_at,
+        v.updated_at,
         v.view_count,
         v.like_count,
         v.comment_count,
         v.netfree_status,
+        v.netfree_discovered_at,
         v.netfree_checked_at,
         v.netfree_recheck_after,
         v.netfree_check_attempts,

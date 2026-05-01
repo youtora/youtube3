@@ -261,9 +261,9 @@ export async function onRequest({ env, request }) {
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, netfree_status, updated_at
+          language_code, language_source, netfree_status, netfree_discovered_at, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int      = excluded.channel_int,
           title            = excluded.title,
@@ -287,7 +287,7 @@ export async function onRequest({ env, request }) {
           OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count, -1) != excluded.like_count)
           OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count, -1) != excluded.comment_count)
           OR (excluded.language_code IS NOT NULL AND COALESCE(videos.language_code,'') != excluded.language_code)
-      `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, viewCount, likeCount, commentCount, statsFetchedAt, lang.language_code, lang.language_source, netfreeDefaultStatus, now));
+      `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, viewCount, likeCount, commentCount, statsFetchedAt, lang.language_code, lang.language_source, netfreeDefaultStatus, now, now));
 
       stmts.push(...channelVideoLanguageStmts(env.DB, channelInt, lang.language_code, lang.language_source));
 
