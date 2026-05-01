@@ -19,6 +19,14 @@ function parsePositiveInt(value, fallback, min, max) {
   return Math.min(Math.max(n, min), max);
 }
 
+function parsePendingMinAgeDays(value, fallback = 7) {
+  return parsePositiveInt(value, fallback, 0, 365);
+}
+
+function pendingCutoffSec(t, minAgeDays) {
+  return t - (minAgeDays * 86400);
+}
+
 const STATUS_MAP = {
   ready: "ready",
   due: "ready",
@@ -168,9 +176,9 @@ function rowQuery(whereSql, sort = "priority") {
   `;
 }
 
-async function loadCounts(DB) {
+async function loadCounts(DB, minPendingAgeDays = 7) {
   const t = nowSec();
-  const weekAgo = t - (7 * 86400);
+  const pendingCutoff = pendingCutoffSec(t, minPendingAgeDays);
 
   const counts = await DB.prepare(`
     SELECT netfree_status, COUNT(*) AS count
@@ -185,7 +193,7 @@ async function loadCounts(DB) {
     WHERE v.netfree_status = 0
       AND COALESCE(v.netfree_checked_at, 0) = 0
       AND ${discoveredExpr()} <= ?
-  `).bind(weekAgo).first();
+  `).bind(pendingCutoff).first();
 
   const pendingTooNew = await DB.prepare(`
     SELECT COUNT(*) AS count
@@ -193,7 +201,7 @@ async function loadCounts(DB) {
     WHERE v.netfree_status = 0
       AND COALESCE(v.netfree_checked_at, 0) = 0
       AND ${discoveredExpr()} > ?
-  `).bind(weekAgo).first();
+  `).bind(pendingCutoff).first();
 
   const recheckDue = await DB.prepare(`
     SELECT COUNT(*) AS count
@@ -255,16 +263,20 @@ function orderArgs(sort, weekAgo, t) {
 async function listQueue({ DB, url }) {
   const limit = parsePositiveInt(url.searchParams.get("limit"), 30, 1, 100);
   const statusFilter = normalizeStatus(url.searchParams.get("status") || "ready", "ready");
+  const minPendingAgeDays = parsePendingMinAgeDays(
+    url.searchParams.get("min_age_days") || url.searchParams.get("min_pending_age_days"),
+    7
+  );
   const sort = normalizeSort(url.searchParams.get("sort"));
   const channelId = String(url.searchParams.get("channel_id") || "").trim();
   const q = String(url.searchParams.get("q") || "").trim();
   const t = nowSec();
-  const weekAgo = t - (7 * 86400);
+  const pendingCutoff = pendingCutoffSec(t, minPendingAgeDays);
 
   const where = [];
   const args = [];
 
-  addStatusWhere({ where, args, statusFilter, weekAgo, t });
+  addStatusWhere({ where, args, statusFilter, weekAgo: pendingCutoff, t });
 
   if (channelId) {
     where.push("c.channel_id = ?");
@@ -278,7 +290,7 @@ async function listQueue({ DB, url }) {
   }
 
   const rows = await DB.prepare(rowQuery(`WHERE ${where.join(" AND ")}`, sort))
-    .bind(...args, ...orderArgs(sort, weekAgo, t), limit)
+    .bind(...args, ...orderArgs(sort, pendingCutoff, t), limit)
     .all();
 
   return json({
@@ -288,8 +300,8 @@ async function listQueue({ DB, url }) {
     limit,
     query: q,
     channel_id: channelId || null,
-    min_pending_age_days: 7,
-    counts: await loadCounts(DB),
+    min_pending_age_days: minPendingAgeDays,
+    counts: await loadCounts(DB, minPendingAgeDays),
     items: rows.results || []
   });
 }
@@ -297,10 +309,11 @@ async function listQueue({ DB, url }) {
 async function claimQueue({ DB, body }) {
   const limit = parsePositiveInt(body.limit, 10, 1, 50);
   const leaseSeconds = parsePositiveInt(body.lease_seconds, 1800, 60, 7200);
+  const minPendingAgeDays = parsePendingMinAgeDays(body.min_age_days ?? body.min_pending_age_days, 7);
   const worker = String(body.worker || body.worker_id || "local-checker").trim().slice(0, 80) || "local-checker";
   const sort = normalizeSort(body.sort);
   const t = nowSec();
-  const weekAgo = t - (7 * 86400);
+  const pendingCutoff = pendingCutoffSec(t, minPendingAgeDays);
   const staleBefore = t - leaseSeconds;
 
   const rows = await DB.prepare(`
@@ -340,7 +353,7 @@ async function claimQueue({ DB, body }) {
       )
     ${orderBySql(sort)}
     LIMIT ?
-  `).bind(weekAgo, t, staleBefore, ...orderArgs(sort, weekAgo, t), limit).all();
+  `).bind(pendingCutoff, t, staleBefore, ...orderArgs(sort, pendingCutoff, t), limit).all();
 
   const items = rows.results || [];
   if (!items.length) {
@@ -349,7 +362,7 @@ async function claimQueue({ DB, body }) {
       claimed: 0,
       worker,
       items: [],
-      counts: await loadCounts(DB)
+      counts: await loadCounts(DB, minPendingAgeDays)
     });
   }
 
@@ -365,7 +378,7 @@ async function claimQueue({ DB, body }) {
   const ids = items.map((item) => item.video_id);
   const placeholders = ids.map(() => "?").join(",");
   const updatedRows = await DB.prepare(rowQuery(`WHERE v.video_id IN (${placeholders})`, sort))
-    .bind(...ids, ...orderArgs(sort, weekAgo, t), ids.length)
+    .bind(...ids, ...orderArgs(sort, pendingCutoff, t), ids.length)
     .all();
 
   return json({
@@ -374,9 +387,9 @@ async function claimQueue({ DB, body }) {
     worker,
     lease_seconds: leaseSeconds,
     sort,
-    min_pending_age_days: 7,
+    min_pending_age_days: minPendingAgeDays,
     items: updatedRows.results || items,
-    counts: await loadCounts(DB)
+    counts: await loadCounts(DB, minPendingAgeDays)
   });
 }
 
