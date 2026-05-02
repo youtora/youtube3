@@ -70,6 +70,7 @@ export async function onRequest({ env, request }) {
     } catch (_) {}
 
     let delVideoDetailsFts = 0;
+    let delVideoDetailsFtsError = "";
     try {
       const r = await env.DB.prepare(`
         DELETE FROM video_details_fts
@@ -80,7 +81,9 @@ export async function onRequest({ env, request }) {
         )
       `).bind(channel_int).run();
       delVideoDetailsFts = r?.meta?.changes || 0;
-    } catch (_) {}
+    } catch (e) {
+      delVideoDetailsFtsError = String(e?.message || e || "");
+    }
 
     let delVideoTags = 0;
     try {
@@ -138,6 +141,26 @@ export async function onRequest({ env, request }) {
       WHERE id = ?
     `).bind(channel_int).run();
 
+    // ניקוי שאריות FTS יתומות.
+    // זה חשוב בעיקר אם בעבר נמחקו videos/video_details אבל נשארו שורות ב־video_details_fts.
+    // מחיקה לפי ערוץ לא תופסת שורות כאלה, כי כבר אין להן שורת videos שממנה אפשר לדעת את channel_int.
+    let delOrphanVideoDetailsFts = 0;
+    let delOrphanVideoDetailsFtsError = "";
+    try {
+      const r = await env.DB.prepare(`
+        DELETE FROM video_details_fts
+        WHERE rowid IN (
+          SELECT f.rowid
+          FROM video_details_fts f
+          LEFT JOIN videos v ON v.video_id = f.video_id
+          WHERE v.video_id IS NULL
+        )
+      `).run();
+      delOrphanVideoDetailsFts = r?.meta?.changes || 0;
+    } catch (e) {
+      delOrphanVideoDetailsFtsError = String(e?.message || e || "");
+    }
+
     return Response.json({
       ok: true,
       action: "purge",
@@ -145,6 +168,7 @@ export async function onRequest({ env, request }) {
       deleted: {
         video_fts: delFts,
         video_details_fts: delVideoDetailsFts,
+        orphan_video_details_fts: delOrphanVideoDetailsFts,
         video_tags: delVideoTags,
         video_details: delVideoDetails,
         videos: delVideos?.meta?.changes || 0,
@@ -152,6 +176,10 @@ export async function onRequest({ env, request }) {
         subscriptions: delSubs?.meta?.changes || 0,
         channel_backfill: delBackfill?.meta?.changes || 0,
         channels: delChannel?.meta?.changes || 0
+      },
+      errors: {
+        video_details_fts: delVideoDetailsFtsError,
+        orphan_video_details_fts: delOrphanVideoDetailsFtsError
       }
     }, { headers: { "cache-control": "no-store" } });
   }
