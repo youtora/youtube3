@@ -803,13 +803,25 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     }
 
     if (meta) {
+      const detailStmts = videoDetailsStmts(env, vid, meta, ts);
+
       try {
-        const detailStmts = videoDetailsStmts(env, vid, meta, ts);
-        if (detailStmts.length) await env.DB.batch(detailStmts);
+        // חשוב: קודם שומרים את video_details לבד.
+        // אם FTS או tags נופלים, התיאור עצמו לא נאבד.
+        await detailStmts[0].run();
         metaRows++;
       } catch (e) {
         console.log(
-          `video metadata upsert failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
+          `video_details upsert failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
+        );
+        continue;
+      }
+
+      try {
+        if (detailStmts.length > 1) await env.DB.batch(detailStmts.slice(1));
+      } catch (e) {
+        console.log(
+          `video_details secondary indexes update failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
         );
       }
     }
@@ -940,6 +952,109 @@ async function backfillSome(env, maxCalls=1){
     }
   }
 }
+
+async function refreshMissingDetailsSome(env, limit=3){
+  if(!env.YT_API_KEY) return;
+
+  const rows = await env.DB.prepare(`
+    SELECT v.video_id
+    FROM videos v
+    LEFT JOIN video_details d ON d.video_id = v.video_id
+    WHERE d.video_id IS NULL
+    ORDER BY COALESCE(v.stats_fetched_at, 0) ASC, v.published_at DESC, v.id DESC
+    LIMIT ?
+  `).bind(limit).all();
+
+  const ids = (rows?.results || [])
+    .map(r => String(r.video_id || "").trim())
+    .filter(Boolean);
+
+  if(!ids.length) return;
+
+  const ts = nowSec();
+  const metaMap = await fetchVideoMeta(env, ids);
+  let detailsRows = 0;
+  let statsRows = 0;
+  let missingFromYoutube = 0;
+
+  for(const vid of ids){
+    const meta = metaMap.get(vid) || null;
+
+    if(!meta){
+      missingFromYoutube++;
+      await env.DB.prepare(`
+        UPDATE videos
+        SET stats_fetched_at = COALESCE(stats_fetched_at, ?), updated_at = ?
+        WHERE video_id = ?
+      `).bind(ts, ts, vid).run();
+      continue;
+    }
+
+    try {
+      const videoKind = normalizeVideoKindForDb(meta.video_kind);
+      await env.DB.prepare(`
+        UPDATE videos
+        SET
+          title = CASE WHEN ? <> '' THEN ? ELSE title END,
+          published_at = CASE WHEN ? > 0 THEN ? ELSE published_at END,
+          video_kind = CASE WHEN ? IS NOT NULL THEN ? ELSE video_kind END,
+          duration_sec = CASE WHEN ? IS NOT NULL THEN ? ELSE duration_sec END,
+          view_count = CASE WHEN ? IS NOT NULL THEN ? ELSE view_count END,
+          like_count = CASE WHEN ? IS NOT NULL THEN ? ELSE like_count END,
+          comment_count = CASE WHEN ? IS NOT NULL THEN ? ELSE comment_count END,
+          stats_fetched_at = ?,
+          updated_at = ?
+        WHERE video_id = ?
+      `).bind(
+        meta.title || "",
+        meta.title || "",
+        toUnixSeconds(meta.published_at_iso || "") || 0,
+        toUnixSeconds(meta.published_at_iso || "") || 0,
+        videoKind,
+        videoKind,
+        meta.duration_sec ?? null,
+        meta.duration_sec ?? null,
+        meta.view_count ?? null,
+        meta.view_count ?? null,
+        meta.like_count ?? null,
+        meta.like_count ?? null,
+        meta.comment_count ?? null,
+        meta.comment_count ?? null,
+        ts,
+        ts,
+        vid
+      ).run();
+      statsRows++;
+    } catch (e) {
+      console.log(`refreshMissingDetailsSome video update failed vid=${vid} error=${String(e)}`);
+    }
+
+    const detailStmts = videoDetailsStmts(env, vid, meta, ts);
+
+    try {
+      // קודם שומרים video_details לבד, ורק אחר כך אינדקסים משניים.
+      await detailStmts[0].run();
+      detailsRows++;
+    } catch (e) {
+      console.log(`refreshMissingDetailsSome video_details upsert failed vid=${vid} error=${String(e)}`);
+      continue;
+    }
+
+    try {
+      if(detailStmts.length > 1) await env.DB.batch(detailStmts.slice(1));
+    } catch (e) {
+      console.log(`refreshMissingDetailsSome secondary indexes update failed vid=${vid} error=${String(e)}`);
+    }
+  }
+
+  console.log(
+    `refreshMissingDetailsSome checked=${ids.length} ` +
+    `details_rows=${detailsRows} ` +
+    `stats_rows=${statsRows} ` +
+    `missing_from_youtube=${missingFromYoutube}`
+  );
+}
+
 
 /** בדיקת פיד יומית (catch-up) */
 async function catchUpFeeds(env, maxChannels=5){
@@ -1172,7 +1287,7 @@ export default {
 
   async scheduled(event, env, ctx){
     env.DB = createDB(env);
-    console.log("youtube4-cron v7 direct-video-upsert 2026-04-29");
+    console.log("youtube4-cron v8 direct-video-details-first 2026-05-01");
 
     ctx.waitUntil((async ()=>{
       const started = nowSec();
@@ -1190,6 +1305,12 @@ export default {
       catch (e) {
         if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
         console.log(`backfillSome error`, e);
+      }
+
+      try { await refreshMissingDetailsSome(env, intFromEnv(env.CRON_REPAIR_META_PER_RUN, 3, 0, 5)); }
+      catch (e) {
+        if (!lastErr) lastErr = `refreshMissingDetailsSome: ${e?.stack || e}`;
+        console.log(`refreshMissingDetailsSome error`, e);
       }
 
       await setState(env, "cron_last_error", lastErr);
