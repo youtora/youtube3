@@ -69,6 +69,45 @@ export async function onRequest({ env, request }) {
       delFts = r?.meta?.changes || 0;
     } catch (_) {}
 
+    let delVideoDetailsFts = 0;
+    try {
+      const r = await env.DB.prepare(`
+        DELETE FROM video_details_fts
+        WHERE video_id IN (
+          SELECT video_id
+          FROM videos
+          WHERE channel_int = ?
+        )
+      `).bind(channel_int).run();
+      delVideoDetailsFts = r?.meta?.changes || 0;
+    } catch (_) {}
+
+    let delVideoTags = 0;
+    try {
+      const r = await env.DB.prepare(`
+        DELETE FROM video_tags
+        WHERE video_id IN (
+          SELECT video_id
+          FROM videos
+          WHERE channel_int = ?
+        )
+      `).bind(channel_int).run();
+      delVideoTags = r?.meta?.changes || 0;
+    } catch (_) {}
+
+    let delVideoDetails = 0;
+    try {
+      const r = await env.DB.prepare(`
+        DELETE FROM video_details
+        WHERE video_id IN (
+          SELECT video_id
+          FROM videos
+          WHERE channel_int = ?
+        )
+      `).bind(channel_int).run();
+      delVideoDetails = r?.meta?.changes || 0;
+    } catch (_) {}
+
     const delVideos = await env.DB.prepare(`
       DELETE FROM videos
       WHERE channel_int = ?
@@ -105,6 +144,9 @@ export async function onRequest({ env, request }) {
       channel_id,
       deleted: {
         video_fts: delFts,
+        video_details_fts: delVideoDetailsFts,
+        video_tags: delVideoTags,
+        video_details: delVideoDetails,
         videos: delVideos?.meta?.changes || 0,
         playlists: delPlaylists?.meta?.changes || 0,
         subscriptions: delSubs?.meta?.changes || 0,
