@@ -70,6 +70,26 @@ function statusName(status) {
   }
 }
 
+
+async function revealOpenChannels(DB, videoIds, status) {
+  if (Number(status) !== 1 || !videoIds.length) return 0;
+
+  const placeholders = videoIds.map(() => "?").join(",");
+  const result = await DB.prepare(`
+    UPDATE channels
+    SET show_in_public_channels = 1
+    WHERE show_in_public_channels <> 1
+      AND id IN (
+        SELECT DISTINCT channel_int
+        FROM videos
+        WHERE video_id IN (${placeholders})
+          AND netfree_status = 1
+      )
+  `).bind(...videoIds).run();
+
+  return Number(result?.meta?.changes || result?.changes || 0);
+}
+
 function getRecheckAfter(body, status, t) {
   if (Number(status) !== 5) return null;
 
@@ -115,6 +135,7 @@ export async function onRequest({ env, request }) {
     `).bind(status, recheckAfter, status, t, t, videoId, status));
 
     const result = await DB.batch(stmts);
+    const revealed_channels = await revealOpenChannels(DB, videoIds, status);
 
     const placeholders = videoIds.map(() => "?").join(",");
     const rows = await DB.prepare(`
@@ -145,6 +166,7 @@ export async function onRequest({ env, request }) {
       recheck_after: recheckAfter,
       requested: videoIds.length,
       changed: result?.meta?.changes || 0,
+      revealed_channels,
       items: rows.results || []
     });
   } catch (error) {

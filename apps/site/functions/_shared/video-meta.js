@@ -190,22 +190,26 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
     const chunk = items.slice(i, i + 25);
     if(!chunk.length) continue;
 
-    const valuesSql = chunk.map(() => "(?, ?, ?)").join(", ");
-    const binds = [];
+    const inputSql = chunk
+      .map((_, idx) => idx === 0
+        ? "SELECT ? AS tag_type, ? AS tag_value, ? AS tag_norm"
+        : "UNION ALL SELECT ?, ?, ?")
+      .join("\n        ");
+
+    const binds = [videoId];
 
     for(const item of chunk){
       binds.push(item.type, item.value, item.norm);
     }
 
-    binds.push(videoId, videoId);
+    binds.push(videoId);
 
     stmts.push(env.DB.prepare(`
-      WITH input(tag_type, tag_value, tag_norm) AS (
-        VALUES ${valuesSql}
-      )
       INSERT OR IGNORE INTO video_tags(video_id, tag_type, tag_value, tag_norm, video_rowid)
       SELECT ?, input.tag_type, input.tag_value, input.tag_norm, v.id
-      FROM input
+      FROM (
+        ${inputSql}
+      ) AS input
       JOIN videos AS v
         ON v.video_id = ?
     `).bind(...binds));
@@ -262,12 +266,12 @@ export function videoDetailsStmts(env, videoId, meta, ts){
       ts,
       ts
     ),
+    ...videoTagIndexStmts(env, videoId, tags, hashtags),
     env.DB.prepare(`DELETE FROM video_details_fts WHERE video_id = ?`).bind(videoId),
     env.DB.prepare(`
       INSERT INTO video_details_fts(video_id, description, tags, hashtags)
       VALUES(?, ?, ?, ?)
-    `).bind(videoId, description, tagsText, hashtagsText),
-    ...videoTagIndexStmts(env, videoId, tags, hashtags)
+    `).bind(videoId, description, tagsText, hashtagsText)
   ];
 }
 

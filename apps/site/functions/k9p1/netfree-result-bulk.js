@@ -49,6 +49,42 @@ function chunks(items, size) {
   return out;
 }
 
+
+async function revealOpenChannels(DB, items) {
+  const openItems = items.filter((item) => item.status === 1);
+  if (!openItems.length) return 0;
+
+  let changed = 0;
+  for (const part of chunks(openItems, 100)) {
+    const idPlaceholders = part.map(() => "?").join(",");
+    const videoCase = part.map(() => "WHEN ? THEN ?").join(" ");
+    const ids = [];
+    const videoBinds = [];
+
+    for (const item of part) {
+      ids.push(item.id);
+      videoBinds.push(item.id, item.video_id);
+    }
+
+    const result = await DB.prepare(`
+      UPDATE channels
+      SET show_in_public_channels = 1
+      WHERE show_in_public_channels <> 1
+        AND id IN (
+          SELECT DISTINCT channel_int
+          FROM videos
+          WHERE id IN (${idPlaceholders})
+            AND video_id = CASE id ${videoCase} ELSE video_id END
+            AND netfree_status = 1
+        )
+    `).bind(...ids, ...videoBinds).run();
+
+    changed += Number(result?.meta?.changes || result?.changes || 0);
+  }
+
+  return changed;
+}
+
 async function updateChunk(DB, items, { recheckDays, t }) {
   const statusCase = items.map(() => "WHEN ? THEN ?").join(" ");
   const recheckCase = items.map(() => "WHEN ? THEN ?").join(" ");
@@ -112,11 +148,14 @@ export async function onRequest({ env, request }) {
       changed += await updateChunk(DB, part, { recheckDays, t });
     }
 
+    const revealed_channels = await revealOpenChannels(DB, validResults);
+
     return json({
       ok: true,
       requested: Array.isArray(body.results) ? body.results.length : 0,
       accepted: validResults.length,
       changed,
+      revealed_channels,
       skipped_same_status: validResults.length - changed,
       recheck_after_days: recheckDays
     });

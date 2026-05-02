@@ -388,22 +388,26 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
     const chunk = items.slice(i, i + 25);
     if(!chunk.length) continue;
 
-    const valuesSql = chunk.map(() => "(?, ?, ?)").join(", ");
-    const binds = [];
+    const inputSql = chunk
+      .map((_, idx) => idx === 0
+        ? "SELECT ? AS tag_type, ? AS tag_value, ? AS tag_norm"
+        : "UNION ALL SELECT ?, ?, ?")
+      .join("\n        ");
+
+    const binds = [videoId];
 
     for(const item of chunk){
       binds.push(item.type, item.value, item.norm);
     }
 
-    binds.push(videoId, videoId);
+    binds.push(videoId);
 
     stmts.push(env.DB.prepare(`
-      WITH input(tag_type, tag_value, tag_norm) AS (
-        VALUES ${valuesSql}
-      )
       INSERT OR IGNORE INTO video_tags(video_id, tag_type, tag_value, tag_norm, video_rowid)
       SELECT ?, input.tag_type, input.tag_value, input.tag_norm, v.id
-      FROM input
+      FROM (
+        ${inputSql}
+      ) AS input
       JOIN videos AS v
         ON v.video_id = ?
     `).bind(...binds));
@@ -460,12 +464,12 @@ function videoDetailsStmts(env, videoId, meta, ts){
       ts,
       ts
     ),
+    ...videoTagIndexStmts(env, videoId, tags, hashtags),
     env.DB.prepare(`DELETE FROM video_details_fts WHERE video_id = ?`).bind(videoId),
     env.DB.prepare(`
       INSERT INTO video_details_fts(video_id, description, tags, hashtags)
       VALUES(?, ?, ?, ?)
-    `).bind(videoId, description, tagsText, hashtagsText),
-    ...videoTagIndexStmts(env, videoId, tags, hashtags)
+    `).bind(videoId, description, tagsText, hashtagsText)
   ];
 }
 
@@ -804,10 +808,12 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
 
     if (meta) {
       const detailStmts = videoDetailsStmts(env, vid, meta, ts);
+      const ftsStmts = detailStmts.slice(-2);
+      const tagStmts = detailStmts.slice(1, -2);
 
       try {
         // חשוב: קודם שומרים את video_details לבד.
-        // אם FTS או tags נופלים, התיאור עצמו לא נאבד.
+        // אחר כך בונים את video_tags בנפרד, כדי שנפילת FTS לא תמנע תגיות/האשטגים.
         await detailStmts[0].run();
         metaRows++;
       } catch (e) {
@@ -818,10 +824,18 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
       }
 
       try {
-        if (detailStmts.length > 1) await env.DB.batch(detailStmts.slice(1));
+        if (tagStmts.length) await env.DB.batch(tagStmts);
       } catch (e) {
         console.log(
-          `video_details secondary indexes update failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
+          `video_tags index update failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
+        );
+      }
+
+      try {
+        if (ftsStmts.length) await env.DB.batch(ftsStmts);
+      } catch (e) {
+        console.log(
+          `video_details_fts update failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
         );
       }
     }
@@ -1030,9 +1044,11 @@ async function refreshMissingDetailsSome(env, limit=3){
     }
 
     const detailStmts = videoDetailsStmts(env, vid, meta, ts);
+    const ftsStmts = detailStmts.slice(-2);
+    const tagStmts = detailStmts.slice(1, -2);
 
     try {
-      // קודם שומרים video_details לבד, ורק אחר כך אינדקסים משניים.
+      // קודם שומרים video_details לבד, אחר כך video_tags, ובסוף FTS.
       await detailStmts[0].run();
       detailsRows++;
     } catch (e) {
@@ -1041,9 +1057,15 @@ async function refreshMissingDetailsSome(env, limit=3){
     }
 
     try {
-      if(detailStmts.length > 1) await env.DB.batch(detailStmts.slice(1));
+      if(tagStmts.length) await env.DB.batch(tagStmts);
     } catch (e) {
-      console.log(`refreshMissingDetailsSome secondary indexes update failed vid=${vid} error=${String(e)}`);
+      console.log(`refreshMissingDetailsSome video_tags update failed vid=${vid} error=${String(e)}`);
+    }
+
+    try {
+      if(ftsStmts.length) await env.DB.batch(ftsStmts);
+    } catch (e) {
+      console.log(`refreshMissingDetailsSome video_details_fts update failed vid=${vid} error=${String(e)}`);
     }
   }
 
@@ -1111,9 +1133,14 @@ async function catchUpFeeds(env, maxChannels=5){
         }
 
         if(videos.length){
-          const { stmts, metaCount } = await videoUpsertAndMetaStmts(env, videos, now);
-          if(stmts.length) await env.DB.batch(stmts);
-          console.log(`catchUpFeeds inserted/updated ${videos.length} videos with ${metaCount} metadata rows channel_int=${ch.id}`);
+          const writeResult = await upsertVideosAndMetaDirect(env, videos, now);
+          console.log(
+            `catchUpFeeds inserted/updated ${videos.length} videos ` +
+            `video_rows=${writeResult.videoRows} ` +
+            `meta_rows=${writeResult.metaRows} ` +
+            `skipped=${writeResult.skipped} ` +
+            `channel_int=${ch.id}`
+          );
         }
       }
     }

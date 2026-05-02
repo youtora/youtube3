@@ -41,7 +41,16 @@ export async function onRequest({ env, request }) {
     LEFT JOIN channel_languages AS all_cl
       ON all_cl.channel_int = c.id
     WHERE c.is_active = 1
-      AND c.show_in_public_channels = 1
+      AND (
+        c.show_in_public_channels = 1
+        OR EXISTS (
+          SELECT 1
+          FROM videos v
+          WHERE v.channel_int = c.id
+            AND v.netfree_status = 1
+          LIMIT 1
+        )
+      )
       AND cl.language_code = ?
     GROUP BY c.id
     ORDER BY c.title COLLATE NOCASE ASC, c.id ASC
@@ -51,6 +60,6 @@ export async function onRequest({ env, request }) {
 
   return Response.json(
     { channels, lang },
-    { headers: { "cache-control": "public, max-age=120" } }
+    { headers: { "cache-control": "public, max-age=30" } }
   );
 }
