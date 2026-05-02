@@ -19,14 +19,6 @@ function parsePositiveInt(value, fallback, min, max) {
   return Math.min(Math.max(n, min), max);
 }
 
-function parsePendingMinAgeDays(value, fallback = 7) {
-  return parsePositiveInt(value, fallback, 0, 365);
-}
-
-function pendingCutoffSec(t, minAgeDays) {
-  return t - (minAgeDays * 86400);
-}
-
 const STATUS_MAP = {
   ready: "ready",
   due: "ready",
@@ -42,8 +34,7 @@ const STATUS_MAP = {
   netfree_pending: 5,
   recheck: 5,
   hidden: 0,
-  public: 1,
-  חסום: 2,
+  public: 1
 };
 
 function normalizeStatus(raw, fallback = "ready") {
@@ -66,43 +57,27 @@ function normalizeStatus(raw, fallback = "ready") {
 
 function normalizeSort(raw) {
   const value = String(raw || "priority").trim().toLowerCase();
-  if (["priority", "newest", "oldest", "checked_oldest"].includes(value)) return value;
+  if (["priority", "newest", "oldest", "recheck"].includes(value)) return value;
   return "priority";
 }
 
-function discoveredExpr() {
-  return "COALESCE(v.netfree_discovered_at, v.updated_at, v.published_at, 0)";
-}
-
-function dueWhereSql() {
+function readyWhereSql() {
   return `(
     (
       v.netfree_status = 0
-      AND COALESCE(v.netfree_checked_at, 0) = 0
-      AND ${discoveredExpr()} <= ?
+      AND v.netfree_discovered_at <= ?
     )
     OR (
       v.netfree_status = 5
-      AND (
-        v.netfree_recheck_after IS NULL
-        OR v.netfree_recheck_after = 0
-        OR v.netfree_recheck_after <= ?
-      )
+      AND v.netfree_recheck_after <= ?
     )
   )`;
 }
 
 function priorityCaseSql() {
   return `CASE
-      WHEN v.netfree_status = 0
-        AND COALESCE(v.netfree_checked_at, 0) = 0
-        AND ${discoveredExpr()} <= ? THEN 0
-      WHEN v.netfree_status = 5
-        AND (
-          v.netfree_recheck_after IS NULL
-          OR v.netfree_recheck_after = 0
-          OR v.netfree_recheck_after <= ?
-        ) THEN 1
+      WHEN v.netfree_status = 0 AND v.netfree_discovered_at <= ? THEN 0
+      WHEN v.netfree_status = 5 AND v.netfree_recheck_after <= ? THEN 1
       WHEN v.netfree_status = 3 THEN 2
       WHEN v.netfree_status = 2 THEN 3
       WHEN v.netfree_status = 4 THEN 4
@@ -122,20 +97,14 @@ function orderBySql(sort) {
     return `ORDER BY ${priorityCase}, v.published_at ASC, v.id ASC`;
   }
 
-  if (sort === "checked_oldest") {
-    return `ORDER BY
-      ${priorityCase},
-      COALESCE(v.netfree_checked_at, 0) ASC,
-      COALESCE(v.netfree_recheck_after, 0) ASC,
-      v.published_at DESC,
-      v.id DESC`;
+  if (sort === "recheck") {
+    return `ORDER BY ${priorityCase}, v.netfree_recheck_after ASC, v.id ASC`;
   }
 
   return `ORDER BY
       ${priorityCase},
-      CASE WHEN v.netfree_status = 0 THEN ${discoveredExpr()} ELSE NULL END ASC,
-      CASE WHEN v.netfree_status = 5 THEN COALESCE(v.netfree_checked_at, 0) ELSE NULL END ASC,
-      CASE WHEN v.netfree_status = 5 THEN COALESCE(v.netfree_recheck_after, 0) ELSE NULL END ASC,
+      CASE WHEN v.netfree_status = 0 THEN v.netfree_discovered_at ELSE NULL END ASC,
+      CASE WHEN v.netfree_status = 5 THEN v.netfree_recheck_after ELSE NULL END ASC,
       v.published_at DESC,
       v.id DESC`;
 }
@@ -156,12 +125,7 @@ function rowQuery(whereSql, sort = "priority") {
       v.stats_fetched_at,
       v.netfree_status,
       v.netfree_discovered_at,
-      v.netfree_checked_at,
       v.netfree_recheck_after,
-      v.netfree_check_attempts,
-      v.netfree_last_error,
-      v.netfree_claimed_at,
-      v.netfree_claimed_by,
       c.id AS channel_int,
       c.channel_id,
       c.title AS channel_title,
@@ -178,7 +142,7 @@ function rowQuery(whereSql, sort = "priority") {
 
 async function loadCounts(DB, minPendingAgeDays = 7) {
   const t = nowSec();
-  const pendingCutoff = pendingCutoffSec(t, minPendingAgeDays);
+  const pendingCutoff = t - (minPendingAgeDays * 86400);
 
   const counts = await DB.prepare(`
     SELECT netfree_status, COUNT(*) AS count
@@ -189,29 +153,23 @@ async function loadCounts(DB, minPendingAgeDays = 7) {
 
   const pendingReady = await DB.prepare(`
     SELECT COUNT(*) AS count
-    FROM videos v
-    WHERE v.netfree_status = 0
-      AND COALESCE(v.netfree_checked_at, 0) = 0
-      AND ${discoveredExpr()} <= ?
+    FROM videos
+    WHERE netfree_status = 0
+      AND netfree_discovered_at <= ?
   `).bind(pendingCutoff).first();
 
   const pendingTooNew = await DB.prepare(`
     SELECT COUNT(*) AS count
-    FROM videos v
-    WHERE v.netfree_status = 0
-      AND COALESCE(v.netfree_checked_at, 0) = 0
-      AND ${discoveredExpr()} > ?
+    FROM videos
+    WHERE netfree_status = 0
+      AND netfree_discovered_at > ?
   `).bind(pendingCutoff).first();
 
   const recheckDue = await DB.prepare(`
     SELECT COUNT(*) AS count
     FROM videos
     WHERE netfree_status = 5
-      AND (
-        netfree_recheck_after IS NULL
-        OR netfree_recheck_after = 0
-        OR netfree_recheck_after <= ?
-      )
+      AND netfree_recheck_after <= ?
   `).bind(t).first();
 
   const byChannel = await DB.prepare(`
@@ -239,10 +197,10 @@ async function loadCounts(DB, minPendingAgeDays = 7) {
   };
 }
 
-function addStatusWhere({ where, args, statusFilter, weekAgo, t }) {
+function addStatusWhere({ where, args, statusFilter, pendingCutoff, t }) {
   if (statusFilter.mode === "ready") {
-    where.push(dueWhereSql());
-    args.push(weekAgo, t);
+    where.push(readyWhereSql());
+    args.push(pendingCutoff, t);
     return;
   }
 
@@ -255,28 +213,29 @@ function addStatusWhere({ where, args, statusFilter, weekAgo, t }) {
   where.push("v.netfree_status IN (0, 1, 2, 3, 4, 5)");
 }
 
-function orderArgs(sort, weekAgo, t) {
-  // בכל ORDER BY יש priorityCaseSql פעם אחת.
-  return [weekAgo, t];
+function orderArgs(_sort, pendingCutoff, t) {
+  return [pendingCutoff, t];
 }
 
 async function listQueue({ DB, url }) {
   const limit = parsePositiveInt(url.searchParams.get("limit"), 30, 1, 100);
   const statusFilter = normalizeStatus(url.searchParams.get("status") || "ready", "ready");
-  const minPendingAgeDays = parsePendingMinAgeDays(
+  const minPendingAgeDays = parsePositiveInt(
     url.searchParams.get("min_age_days") || url.searchParams.get("min_pending_age_days"),
-    7
+    7,
+    0,
+    365
   );
   const sort = normalizeSort(url.searchParams.get("sort"));
   const channelId = String(url.searchParams.get("channel_id") || "").trim();
   const q = String(url.searchParams.get("q") || "").trim();
   const t = nowSec();
-  const pendingCutoff = pendingCutoffSec(t, minPendingAgeDays);
+  const pendingCutoff = t - (minPendingAgeDays * 86400);
 
   const where = [];
   const args = [];
 
-  addStatusWhere({ where, args, statusFilter, weekAgo: pendingCutoff, t });
+  addStatusWhere({ where, args, statusFilter, pendingCutoff, t });
 
   if (channelId) {
     where.push("c.channel_id = ?");
@@ -306,114 +265,15 @@ async function listQueue({ DB, url }) {
   });
 }
 
-async function claimQueue({ DB, body }) {
-  const limit = parsePositiveInt(body.limit, 10, 1, 50);
-  const leaseSeconds = parsePositiveInt(body.lease_seconds, 1800, 60, 7200);
-  const minPendingAgeDays = parsePendingMinAgeDays(body.min_age_days ?? body.min_pending_age_days, 7);
-  const worker = String(body.worker || body.worker_id || "local-checker").trim().slice(0, 80) || "local-checker";
-  const sort = normalizeSort(body.sort);
-  const t = nowSec();
-  const pendingCutoff = pendingCutoffSec(t, minPendingAgeDays);
-  const staleBefore = t - leaseSeconds;
-
-  const rows = await DB.prepare(`
-    SELECT
-      v.id,
-      v.video_id,
-      v.title,
-      v.published_at,
-      v.updated_at,
-      v.video_kind,
-      v.duration_sec,
-      v.view_count,
-      v.like_count,
-      v.comment_count,
-      v.stats_fetched_at,
-      v.netfree_status,
-      v.netfree_discovered_at,
-      v.netfree_checked_at,
-      v.netfree_recheck_after,
-      v.netfree_check_attempts,
-      v.netfree_last_error,
-      v.netfree_claimed_at,
-      v.netfree_claimed_by,
-      c.id AS channel_int,
-      c.channel_id,
-      c.title AS channel_title,
-      c.thumbnail_url AS channel_thumbnail_url,
-      c.netfree_default_status,
-      c.show_in_public_channels
-    FROM videos v
-    JOIN channels c ON c.id = v.channel_int
-    WHERE ${dueWhereSql()}
-      AND (
-        v.netfree_claimed_at IS NULL
-        OR v.netfree_claimed_at = 0
-        OR v.netfree_claimed_at < ?
-      )
-    ${orderBySql(sort)}
-    LIMIT ?
-  `).bind(pendingCutoff, t, staleBefore, ...orderArgs(sort, pendingCutoff, t), limit).all();
-
-  const items = rows.results || [];
-  if (!items.length) {
-    return json({
-      ok: true,
-      claimed: 0,
-      worker,
-      items: [],
-      counts: await loadCounts(DB, minPendingAgeDays)
-    });
-  }
-
-  const stmts = items.map((item) => DB.prepare(`
-    UPDATE videos
-    SET netfree_claimed_at = ?,
-        netfree_claimed_by = ?
-    WHERE video_id = ?
-  `).bind(t, worker, item.video_id));
-
-  await DB.batch(stmts);
-
-  const ids = items.map((item) => item.video_id);
-  const placeholders = ids.map(() => "?").join(",");
-  const updatedRows = await DB.prepare(rowQuery(`WHERE v.video_id IN (${placeholders})`, sort))
-    .bind(...ids, ...orderArgs(sort, pendingCutoff, t), ids.length)
-    .all();
-
-  return json({
-    ok: true,
-    claimed: items.length,
-    worker,
-    lease_seconds: leaseSeconds,
-    sort,
-    min_pending_age_days: minPendingAgeDays,
-    items: updatedRows.results || items,
-    counts: await loadCounts(DB, minPendingAgeDays)
-  });
-}
-
 export async function onRequest({ env, request }) {
   try {
     const DB = getDB(env);
-    env.DB = DB;
 
     if (request.method === "GET") {
       return await listQueue({ DB, url: new URL(request.url) });
     }
 
-    if (request.method === "POST") {
-      const body = await request.json().catch(() => ({}));
-      const action = String(body.action || "").trim().toLowerCase();
-
-      if (action === "claim") {
-        return await claimQueue({ DB, body });
-      }
-
-      return json({ ok: false, error: "unsupported action" }, 400);
-    }
-
-    return json({ ok: false, error: "use GET or POST" }, 405);
+    return json({ ok: false, error: "use GET" }, 405);
   } catch (error) {
     return json({
       ok: false,

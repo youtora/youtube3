@@ -449,11 +449,9 @@ https://www.youtube.com/c/SomeChannel"
               </td>
               <td>${nfStatusLabel(v.netfree_status)}</td>
               <td>
-                <div>ניסיונות: ${Number(v.netfree_check_attempts || 0)}</div>
                 <div style="font-size:12px;color:#666">${v.netfree_discovered_at ? `נכנס לתור: ${fmtTs(v.netfree_discovered_at)}` : ""}</div>
-                <div style="font-size:12px;color:#666">${v.netfree_checked_at ? `נבדק: ${fmtTs(v.netfree_checked_at)}` : "עדיין לא נבדק"}</div>
                 ${v.netfree_recheck_after ? `<div style="font-size:12px;color:#666">בדיקה חוזרת: ${fmtTs(v.netfree_recheck_after)}</div>` : ``}
-                ${v.netfree_last_error ? `<div style="font-size:12px;color:#b00">${esc(v.netfree_last_error)}</div>` : ``}
+                <div style="font-size:12px;color:#666;margin-top:6px">המערכת החסכונית מעדכנת רק שינוי סטטוס.</div>
               </td>
               <td>
                 <div class="nf-actions">
