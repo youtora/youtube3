@@ -136,52 +136,6 @@ async function runStatementsSequential(stmts){
   return changes;
 }
 
-async function batchRunStatements(env, stmts){
-  const list = (stmts || []).filter(Boolean);
-  if(!list.length) return 0;
-
-  const results = await env.DB.batch(list);
-  if(!Array.isArray(results)) return 0;
-
-  return results.reduce((sum, result) => {
-    return sum + Number(
-      result?.rowsAffected ??
-      result?.meta?.changes ??
-      result?.rows_affected ??
-      0
-    );
-  }, 0);
-}
-
-async function batchRunWithFallback(env, stmts, label){
-  const list = (stmts || []).filter(Boolean);
-  if(!list.length) return { changes: 0, ok: 0, failed: 0 };
-
-  try {
-    const changes = await batchRunStatements(env, list);
-    return { changes, ok: list.length, failed: 0 };
-  } catch (error) {
-    console.log(`${label} batch failed; falling back one-by-one error=${String(error)}`);
-
-    let changes = 0;
-    let ok = 0;
-    let failed = 0;
-
-    for(const stmt of list){
-      try {
-        const result = await stmt.run();
-        changes += Number(result?.meta?.changes || 0);
-        ok++;
-      } catch (e) {
-        failed++;
-        console.log(`${label} single statement failed error=${String(e)}`);
-      }
-    }
-
-    return { changes, ok, failed };
-  }
-}
-
 function nowSec(){ return Math.floor(Date.now()/1000); }
 function toUnixSeconds(iso){
   const ms = Date.parse(iso || "");
@@ -527,7 +481,7 @@ function videoDetailsStmts(env, videoId, meta, ts){
       )
       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(video_id) DO UPDATE SET
-        description            = excluded.description,
+        description            = CASE WHEN excluded.description <> '' THEN excluded.description ELSE video_details.description END,
         tags_json              = excluded.tags_json,
         hashtags_json          = excluded.hashtags_json,
         category_id            = excluded.category_id,
@@ -537,7 +491,7 @@ function videoDetailsStmts(env, videoId, meta, ts){
         fetched_at             = excluded.fetched_at,
         updated_at             = excluded.updated_at
       WHERE
-        video_details.description IS NOT excluded.description
+        (excluded.description <> '' AND video_details.description IS NOT excluded.description)
         OR video_details.tags_json IS NOT excluded.tags_json
         OR video_details.hashtags_json IS NOT excluded.hashtags_json
         OR video_details.category_id IS NOT excluded.category_id
@@ -786,12 +740,10 @@ function videoUpsertAndMetaStmts(env, rows, ts){
   });
 }
 async function upsertVideosAndMetaDirect(env, rows, ts){
-  // v13: גרסה חסכונית לקרון.
-  // מביאים metadata בקריאת YouTube אחת, ואז עושים batch לפעולות DB.
-  // זה מונע מאות תתי־בקשות כשיש הרבה תגיות לכל סרטון.
+  // גרסה בטוחה במיוחד לקרון: מכניסים את שורת videos אחת-אחת.
+  // כך פריט בעייתי אחד מיוטיוב לא מפיל את כל הדף, והלוג יראה בדיוק מה נשבר.
   const cleanRows = [];
   const seen = new Set();
-  let skipped = 0;
 
   for (const raw of (rows || [])) {
     const vid = String(
@@ -802,7 +754,6 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     ).trim();
 
     if (!vid || seen.has(vid)) {
-      skipped++;
       if (!vid) {
         console.log("upsertVideosAndMetaDirect skip row without video id", JSON.stringify(raw || {}).slice(0, 500));
       }
@@ -827,136 +778,133 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     return {
       videoRows: 0,
       metaRows: 0,
-      tagRows: 0,
-      skipped
+      skipped: (rows || []).length
     };
   }
 
   const metaMap = await fetchVideoMeta(env, ids);
-
-  const videoStmts = [];
-  const langStmts = [];
-  const detailUpsertStmts = [];
-  const tagIndexStmts = [];
-  const ftsStmts = [];
+  let videoRows = 0;
+  let metaRows = 0;
+  let tagRows = 0;
+  let skipped = 0;
 
   for (const row of cleanRows) {
     const vid = String(row.vid || "").trim();
+
+    if (!vid) {
+      skipped++;
+      continue;
+    }
+
     const meta = metaMap.get(vid) || null;
     const title = (meta?.title || row.title || "[untitled]").slice(0, 200);
     const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
     const lang = inferVideoLanguage(meta || {}, row.channel_language_code || "");
     const videoKind = normalizeVideoKindForDb(meta?.video_kind);
 
-    videoStmts.push(env.DB.prepare(`
-      INSERT INTO videos(
-        video_id, channel_int, title, published_at,
-        video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-        language_code, language_source, netfree_status, netfree_discovered_at, updated_at
-      )
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(video_id) DO UPDATE SET
-        channel_int=excluded.channel_int,
-        title=excluded.title,
-        published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
-        video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
-        duration_sec=CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
-        view_count=CASE WHEN excluded.view_count IS NOT NULL THEN excluded.view_count ELSE videos.view_count END,
-        like_count=CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
-        comment_count=CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
-        stats_fetched_at=CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
-        language_code=CASE WHEN excluded.language_code IS NOT NULL AND excluded.language_code <> '' THEN excluded.language_code ELSE videos.language_code END,
-        language_source=CASE WHEN excluded.language_source IS NOT NULL AND excluded.language_source <> '' THEN excluded.language_source ELSE videos.language_source END,
-        updated_at=excluded.updated_at
-    `).bind(
-      vid,
-      row.channel_int,
-      title,
-      publishedAt,
-      videoKind,
-      meta?.duration_sec ?? null,
-      meta?.view_count ?? null,
-      meta?.like_count ?? null,
-      meta?.comment_count ?? null,
-      meta ? ts : null,
-      lang.language_code,
-      lang.language_source,
-      row.netfree_default_status,
-      ts,
-      ts
-    ));
+    try {
+      await env.DB.prepare(`
+        INSERT INTO videos(
+          video_id, channel_int, title, published_at,
+          video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
+          language_code, language_source, netfree_status, netfree_discovered_at, updated_at
+        )
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(video_id) DO UPDATE SET
+          channel_int=excluded.channel_int,
+          title=excluded.title,
+          published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
+          video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
+          duration_sec=CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
+          view_count=CASE WHEN excluded.view_count IS NOT NULL THEN excluded.view_count ELSE videos.view_count END,
+          like_count=CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
+          comment_count=CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
+          stats_fetched_at=CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
+          language_code=CASE WHEN excluded.language_code IS NOT NULL AND excluded.language_code <> '' THEN excluded.language_code ELSE videos.language_code END,
+          language_source=CASE WHEN excluded.language_source IS NOT NULL AND excluded.language_source <> '' THEN excluded.language_source ELSE videos.language_source END,
+          updated_at=excluded.updated_at
+      `).bind(
+        vid,
+        row.channel_int,
+        title,
+        publishedAt,
+        videoKind,
+        meta?.duration_sec ?? null,
+        meta?.view_count ?? null,
+        meta?.like_count ?? null,
+        meta?.comment_count ?? null,
+        meta ? ts : null,
+        lang.language_code,
+        lang.language_source,
+        row.netfree_default_status,
+        ts,
+        ts
+      ).run();
 
-    langStmts.push(...channelVideoLanguageStmts(env, row.channel_int, lang.language_code, lang.language_source));
+      const langStmts = channelVideoLanguageStmts(env, row.channel_int, lang.language_code, lang.language_source);
+      if (langStmts.length) await env.DB.batch(langStmts);
 
-    if(meta){
+      videoRows++;
+    } catch (e) {
+      skipped++;
+      console.log(
+        `video row upsert failed channel_int=${row.channel_int} vid=${vid} ` +
+        `title=${JSON.stringify(title).slice(0, 220)} error=${String(e)}`
+      );
+      continue;
+    }
+
+    if (meta) {
       const detailStmts = videoDetailsStmts(env, vid, meta, ts);
-      detailUpsertStmts.push(detailStmts[0]);
-      tagIndexStmts.push(...detailStmts.slice(1, -2));
-      ftsStmts.push(...detailStmts.slice(-2));
-    }
-  }
+      const ftsStmts = detailStmts.slice(-2);
+      const tagStmts = detailStmts.slice(1, -2);
 
-  const videoResult = await batchRunWithFallback(env, videoStmts, "videos upsert");
-  if(videoResult.failed > 0){
-    skipped += videoResult.failed;
-  }
+      try {
+        // חשוב: קודם שומרים את video_details לבד.
+        // אחר כך בונים את video_tags בנפרד, כדי שנפילת FTS לא תמנע תגיות/האשטגים.
+        await detailStmts[0].run();
+        metaRows++;
+      } catch (e) {
+        console.log(
+          `video_details upsert failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
+        );
+        continue;
+      }
 
-  if(langStmts.length){
-    try {
-      await batchRunStatements(env, langStmts);
-    } catch (e) {
-      console.log(`channel language batch failed error=${String(e)}`);
-    }
-  }
-
-  let metaRows = 0;
-  if(detailUpsertStmts.length){
-    const detailsResult = await batchRunWithFallback(env, detailUpsertStmts, "video_details upsert");
-    metaRows = detailsResult.ok;
-  }
-
-  let tagRows = 0;
-  if(tagIndexStmts.length){
-    try {
-      tagRows = await batchRunStatements(env, tagIndexStmts);
-    } catch (e) {
-      console.log(`video_tags batch failed; retrying small chunks error=${String(e)}`);
-
-      // fallback חסכוני: chunks של 6 statements = 2 סרטונים בערך.
-      // עדיין הרבה פחות כבד מפקודה-פקודה לכל תגית.
-      for(let i = 0; i < tagIndexStmts.length; i += 6){
-        try {
-          tagRows += await batchRunStatements(env, tagIndexStmts.slice(i, i + 6));
-        } catch (chunkError) {
-          console.log(`video_tags chunk failed error=${String(chunkError)}`);
+      try {
+        if (tagStmts.length) {
+          tagRows += await runStatementsSequential(tagStmts);
         }
+      } catch (e) {
+        console.log(
+          `video_tags index update failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
+        );
+      }
+
+      try {
+        if (ftsStmts.length) await env.DB.batch(ftsStmts);
+      } catch (e) {
+        console.log(
+          `video_details_fts update failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
+        );
       }
     }
   }
 
-  if(ftsStmts.length){
-    try {
-      await batchRunStatements(env, ftsStmts);
-    } catch (e) {
-      console.log(`video_details_fts batch failed error=${String(e)}`);
-    }
-  }
-
   return {
-    videoRows: cleanRows.length - skipped,
+    videoRows,
     metaRows,
     tagRows,
     skipped
   };
 }
 
+
 async function backfillSome(env, maxCalls=1){
   if(!env.YT_API_KEY) return 0;
-
-  // v13: מגבילים ל-3 סרטונים בכל דף.
-  // זה עדיין מתקדם אוטומטית בכל דקת cron, אבל לא שובר את מגבלת subrequests.
-  const pageSize = intFromEnv(env.CRON_BACKFILL_PAGE_SIZE, 3, 1, 3);
   let totalImported = 0;
+
+  const pageSize = intFromEnv(env.CRON_BACKFILL_PAGE_SIZE, 1, 1, 1);
 
   const rows = await env.DB.prepare(`
     SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token, c.language_code, c.netfree_default_status
@@ -983,6 +931,8 @@ async function backfillSome(env, maxCalls=1){
       const u = new URL("https://www.googleapis.com/youtube/v3/playlistItems");
       u.searchParams.set("part","snippet,contentDetails");
       u.searchParams.set("playlistId", playlistId);
+      // כל סרטון שנכנס דרך הקרון מקבל metadata מיד.
+      // שומרים על דף קטן כדי לא לעבור את מגבלת subrequests של Cloudflare/Turso.
       u.searchParams.set("maxResults", String(pageSize));
       if(r.next_page_token) u.searchParams.set("pageToken", r.next_page_token);
       u.searchParams.set("key", env.YT_API_KEY);
@@ -1001,6 +951,7 @@ async function backfillSome(env, maxCalls=1){
           ""
         ).trim();
 
+        // לפעמים YouTube מחזיר פריטים מחוקים/פרטיים בלי videoId.
         if(!vid || seen.has(vid)) continue;
         seen.add(vid);
 
@@ -1016,6 +967,7 @@ async function backfillSome(env, maxCalls=1){
 
       if(videos.length){
         const writeResult = await upsertVideosAndMetaDirect(env, videos, now);
+        totalImported += Number(writeResult.videoRows || 0);
 
         const check = await env.DB.prepare(`
           SELECT
@@ -1030,15 +982,13 @@ async function backfillSome(env, maxCalls=1){
           `backfillSome page_items=${videos.length} ` +
           `video_rows=${writeResult.videoRows} ` +
           `meta_rows=${writeResult.metaRows} ` +
-          `tag_rows=${writeResult.tagRows} ` +
+          `tag_rows=${writeResult.tagRows ?? 0} ` +
           `skipped=${writeResult.skipped} ` +
           `db_videos=${check?.videos_in_db ?? null} ` +
           `oldest=${check?.oldest_published ?? null} ` +
           `last_video_updated=${check?.last_video_updated ?? null} ` +
           `channel_int=${r.channel_int}`
         );
-
-        totalImported += Number(writeResult.videoRows || videos.length || 0);
       }
 
       const next = data?.nextPageToken || null;
@@ -1424,7 +1374,7 @@ export default {
 
   async scheduled(event, env, ctx){
     env.DB = createDB(env);
-    console.log("youtube4-cron v13 batched-tags-low-subrequests 2026-05-03");
+    console.log("youtube4-cron v14 safe-one-by-one-page1 2026-05-03");
 
     ctx.waitUntil((async ()=>{
       const started = nowSec();
@@ -1439,24 +1389,22 @@ export default {
       }
 
       let backfillImported = 0;
-      try {
-        backfillImported = await backfillSome(env, intFromEnv(env.CRON_BACKFILL_CHANNELS, 1, 1, 1)) || 0;
-      }
+      try { backfillImported = await backfillSome(env, intFromEnv(env.CRON_BACKFILL_CHANNELS, 1, 1, 1)); }
       catch (e) {
         if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
         console.log(`backfillSome error`, e);
       }
 
-      // בזמן backfill פעיל לא מריצים גם repair באותה invocation,
-      // כדי לא לעבור שוב את מגבלת subrequests.
-      if (!backfillImported) {
-        try { await refreshMissingDetailsSome(env, intFromEnv(env.CRON_REPAIR_META_PER_RUN, 1, 0, 2)); }
+      // כדי לא להפיל את הקרון ממגבלת subrequests:
+      // אם כבר הכנסנו סרטון מ-backfill, לא מריצים גם תיקון ישנים באותה ריצה.
+      if(backfillImported > 0){
+        console.log(`refreshMissingDetailsSome skipped because backfillImported=${backfillImported}`);
+      } else {
+        try { await refreshMissingDetailsSome(env, intFromEnv(env.CRON_REPAIR_META_PER_RUN, 1, 0, 1)); }
         catch (e) {
           if (!lastErr) lastErr = `refreshMissingDetailsSome: ${e?.stack || e}`;
           console.log(`refreshMissingDetailsSome error`, e);
         }
-      } else {
-        console.log(`refreshMissingDetailsSome skipped because backfill_imported=${backfillImported}`);
       }
 
       await setState(env, "cron_last_error", lastErr);

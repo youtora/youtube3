@@ -272,7 +272,7 @@ export function videoDetailsStmts(env, videoId, meta, ts){
       )
       VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(video_id) DO UPDATE SET
-        description            = excluded.description,
+        description            = CASE WHEN excluded.description <> '' THEN excluded.description ELSE video_details.description END,
         tags_json              = excluded.tags_json,
         hashtags_json          = excluded.hashtags_json,
         category_id            = excluded.category_id,
@@ -282,7 +282,7 @@ export function videoDetailsStmts(env, videoId, meta, ts){
         fetched_at             = excluded.fetched_at,
         updated_at             = excluded.updated_at
       WHERE
-        video_details.description IS NOT excluded.description
+        (excluded.description <> '' AND video_details.description IS NOT excluded.description)
         OR video_details.tags_json IS NOT excluded.tags_json
         OR video_details.hashtags_json IS NOT excluded.hashtags_json
         OR video_details.category_id IS NOT excluded.category_id
