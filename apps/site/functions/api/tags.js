@@ -1,5 +1,6 @@
 import { getDB } from "../_db.js";
 import { normalizePublicLang } from "../_shared/language.js";
+
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
@@ -23,18 +24,15 @@ export async function onRequest({ env, request }) {
 
   const res = await env.DB.prepare(`
     SELECT
-      t.tag_norm,
-      MIN(t.tag_value) AS tag_value,
-      COUNT(*) AS video_count,
-      MAX(v.published_at) AS latest_published_at
-    FROM video_tags AS t
-    JOIN videos AS v
-      ON v.id = t.video_rowid
-    WHERE t.tag_type = ?
-      AND v.netfree_status = 1
-      AND v.language_code = ?
-    GROUP BY t.tag_norm
-    ORDER BY video_count DESC, latest_published_at DESC, t.tag_norm ASC
+      tag_norm,
+      tag_value,
+      video_count,
+      latest_published_at
+    FROM tag_stats
+    WHERE tag_type = ?
+      AND language_code = ?
+      AND video_count > 0
+    ORDER BY video_count DESC, latest_published_at DESC, tag_norm ASC
     LIMIT ? OFFSET ?
   `).bind(type, lang, limit, offset).all();
 

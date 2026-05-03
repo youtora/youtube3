@@ -182,40 +182,40 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
     ...uniqueIndexedTags(hashtags, "hashtag", 80)
   ];
 
-  const stmts = [
-    env.DB.prepare(`DELETE FROM video_tags WHERE video_id = ?`).bind(videoId)
-  ];
+  const itemsJson = JSON.stringify(items);
 
-  for(let i = 0; i < items.length; i += 25){
-    const chunk = items.slice(i, i + 25);
-    if(!chunk.length) continue;
+  return [
+    // מוחק רק תגיות שכבר לא קיימות במטא־דאטה החדש.
+    // זה מונע מחיקה+הכנסה מחדש בכל רענון, ולכן גם tag_stats נשאר קל לעדכון.
+    env.DB.prepare(`
+      DELETE FROM video_tags
+      WHERE video_id = ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM json_each(?) AS j
+          WHERE json_extract(j.value, '$.type') = video_tags.tag_type
+            AND json_extract(j.value, '$.norm') = video_tags.tag_norm
+        )
+    `).bind(videoId, itemsJson),
 
-    const inputSql = chunk
-      .map((_, idx) => idx === 0
-        ? "SELECT ? AS tag_type, ? AS tag_value, ? AS tag_norm"
-        : "UNION ALL SELECT ?, ?, ?")
-      .join("\n        ");
-
-    const binds = [videoId];
-
-    for(const item of chunk){
-      binds.push(item.type, item.value, item.norm);
-    }
-
-    binds.push(videoId);
-
-    stmts.push(env.DB.prepare(`
+    // הכנסה אחת מרוכזת דרך JSON במקום UNION ALL דינמי.
+    // זה יציב יותר מול Turso/libSQL וחוסך עשרות שאילתות לכל סרטון.
+    env.DB.prepare(`
       INSERT OR IGNORE INTO video_tags(video_id, tag_type, tag_value, tag_norm, video_rowid)
-      SELECT ?, input.tag_type, input.tag_value, input.tag_norm, v.id
-      FROM (
-        ${inputSql}
-      ) AS input
+      SELECT
+        ?,
+        json_extract(j.value, '$.type'),
+        json_extract(j.value, '$.value'),
+        json_extract(j.value, '$.norm'),
+        v.id
+      FROM json_each(?) AS j
       JOIN videos AS v
         ON v.video_id = ?
-    `).bind(...binds));
-  }
-
-  return stmts;
+      WHERE COALESCE(json_extract(j.value, '$.type'), '') <> ''
+        AND COALESCE(json_extract(j.value, '$.value'), '') <> ''
+        AND COALESCE(json_extract(j.value, '$.norm'), '') <> ''
+    `).bind(videoId, itemsJson, videoId)
+  ];
 }
 
 export function videoDetailsStmts(env, videoId, meta, ts){
