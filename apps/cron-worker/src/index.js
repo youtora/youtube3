@@ -125,6 +125,17 @@ function createDB(env) {
   };
 }
 
+async function runStatementsSequential(stmts){
+  let changes = 0;
+
+  for(const stmt of stmts || []){
+    const result = await stmt.run();
+    changes += Number(result?.meta?.changes || 0);
+  }
+
+  return changes;
+}
+
 function nowSec(){ return Math.floor(Date.now()/1000); }
 function toUnixSeconds(iso){
   const ms = Date.parse(iso || "");
@@ -375,9 +386,9 @@ function uniqueIndexedTags(tags, type, maxLen){
 }
 
 function videoTagIndexStmts(env, videoId, tags, hashtags){
-  // בונים את אינדקס התגיות מתוך video_details עצמו.
-  // זה בכוונה לא מסתמך על מערכי JS ולא על bind של JSON,
-  // כדי שאם tags_json / hashtags_json נשמרו — video_tags ייבנה בוודאות מאותו מקור.
+  // בכוונה לא מסתמכים כאן על המערכים בזיכרון.
+  // קודם video_details נשמר, ואז בונים את video_tags מאותו JSON שכבר נמצא במסד.
+  // כך אם דף הסרטון מציג tags_json/hashtags_json, אותו מקור בדיוק מזין גם את דפי התגיות.
   return [
     env.DB.prepare(`DELETE FROM video_tags WHERE video_id = ?`).bind(videoId),
 
@@ -387,12 +398,12 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
         d.video_id,
         v.id,
         'tag',
-        TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')),
+        TRIM(j.value),
         LOWER(
           REPLACE(
             REPLACE(
               REPLACE(
-                REPLACE(TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')), '#', ''),
+                REPLACE(TRIM(j.value), '#', ''),
                 '״',
                 '"'
               ),
@@ -413,7 +424,7 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
         END
       ) AS j
       WHERE d.video_id = ?
-        AND TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')) <> ''
+        AND TRIM(COALESCE(j.value, '')) <> ''
     `).bind(videoId),
 
     env.DB.prepare(`
@@ -422,12 +433,12 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
         d.video_id,
         v.id,
         'hashtag',
-        TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')),
+        TRIM(REPLACE(j.value, '#', '')),
         LOWER(
           REPLACE(
             REPLACE(
               REPLACE(
-                REPLACE(TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')), '#', ''),
+                REPLACE(TRIM(REPLACE(j.value, '#', '')), '#', ''),
                 '״',
                 '"'
               ),
@@ -448,7 +459,7 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
         END
       ) AS j
       WHERE d.video_id = ?
-        AND TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')) <> ''
+        AND TRIM(REPLACE(COALESCE(j.value, ''), '#', '')) <> ''
     `).bind(videoId)
   ];
 }
@@ -774,6 +785,7 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
   const metaMap = await fetchVideoMeta(env, ids);
   let videoRows = 0;
   let metaRows = 0;
+  let tagRows = 0;
   let skipped = 0;
 
   for (const row of cleanRows) {
@@ -860,7 +872,9 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
       }
 
       try {
-        if (tagStmts.length) await env.DB.batch(tagStmts);
+        if (tagStmts.length) {
+          tagRows += await runStatementsSequential(tagStmts);
+        }
       } catch (e) {
         console.log(
           `video_tags index update failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
@@ -880,6 +894,7 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
   return {
     videoRows,
     metaRows,
+    tagRows,
     skipped
   };
 }
@@ -1025,6 +1040,7 @@ async function refreshMissingDetailsSome(env, limit=3){
   const metaMap = await fetchVideoMeta(env, ids);
   let detailsRows = 0;
   let statsRows = 0;
+  let tagRows = 0;
   let missingFromYoutube = 0;
 
   for(const vid of ids){
@@ -1093,7 +1109,9 @@ async function refreshMissingDetailsSome(env, limit=3){
     }
 
     try {
-      if(tagStmts.length) await env.DB.batch(tagStmts);
+      if(tagStmts.length) {
+        tagRows += await runStatementsSequential(tagStmts);
+      }
     } catch (e) {
       console.log(`refreshMissingDetailsSome video_tags update failed vid=${vid} error=${String(e)}`);
     }
@@ -1109,6 +1127,7 @@ async function refreshMissingDetailsSome(env, limit=3){
     `refreshMissingDetailsSome checked=${ids.length} ` +
     `details_rows=${detailsRows} ` +
     `stats_rows=${statsRows} ` +
+    `tag_rows=${tagRows} ` +
     `missing_from_youtube=${missingFromYoutube}`
   );
 }
@@ -1350,7 +1369,7 @@ export default {
 
   async scheduled(event, env, ctx){
     env.DB = createDB(env);
-    console.log("youtube4-cron v8 direct-video-details-first 2026-05-01");
+    console.log("youtube4-cron v9 tag-index-from-video-details 2026-05-03");
 
     ctx.waitUntil((async ()=>{
       const started = nowSec();

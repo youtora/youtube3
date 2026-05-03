@@ -177,9 +177,9 @@ function uniqueIndexedTags(tags, type, maxLen){
 }
 
 function videoTagIndexStmts(env, videoId, tags, hashtags){
-  // בונים את אינדקס התגיות מתוך video_details עצמו.
-  // זה בכוונה לא מסתמך על מערכי JS ולא על bind של JSON,
-  // כדי שאם tags_json / hashtags_json נשמרו — video_tags ייבנה בוודאות מאותו מקור.
+  // בכוונה לא מסתמכים כאן על המערכים בזיכרון.
+  // קודם video_details נשמר, ואז בונים את video_tags מאותו JSON שכבר נמצא במסד.
+  // כך אם דף הסרטון מציג tags_json/hashtags_json, אותו מקור בדיוק מזין גם את דפי התגיות.
   return [
     env.DB.prepare(`DELETE FROM video_tags WHERE video_id = ?`).bind(videoId),
 
@@ -189,12 +189,12 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
         d.video_id,
         v.id,
         'tag',
-        TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')),
+        TRIM(j.value),
         LOWER(
           REPLACE(
             REPLACE(
               REPLACE(
-                REPLACE(TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')), '#', ''),
+                REPLACE(TRIM(j.value), '#', ''),
                 '״',
                 '"'
               ),
@@ -215,7 +215,7 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
         END
       ) AS j
       WHERE d.video_id = ?
-        AND TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')) <> ''
+        AND TRIM(COALESCE(j.value, '')) <> ''
     `).bind(videoId),
 
     env.DB.prepare(`
@@ -224,12 +224,12 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
         d.video_id,
         v.id,
         'hashtag',
-        TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')),
+        TRIM(REPLACE(j.value, '#', '')),
         LOWER(
           REPLACE(
             REPLACE(
               REPLACE(
-                REPLACE(TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')), '#', ''),
+                REPLACE(TRIM(REPLACE(j.value, '#', '')), '#', ''),
                 '״',
                 '"'
               ),
@@ -250,7 +250,7 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
         END
       ) AS j
       WHERE d.video_id = ?
-        AND TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')) <> ''
+        AND TRIM(REPLACE(COALESCE(j.value, ''), '#', '')) <> ''
     `).bind(videoId)
   ];
 }
