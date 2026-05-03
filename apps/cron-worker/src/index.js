@@ -384,24 +384,16 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
     env.DB.prepare(`DELETE FROM video_tags WHERE video_id = ?`).bind(videoId)
   ];
 
-  for(let i = 0; i < items.length; i += 50){
-    const chunk = items.slice(i, i + 50);
-    if(!chunk.length) continue;
-
+  for(const item of items){
+    // הכנסה פשוטה ויציבה: בלי UNION, בלי json_each, בלי SQL דינמי.
+    // הטריגר על video_tags יעדכן אוטומטית את tag_stats.
     stmts.push(env.DB.prepare(`
       INSERT OR IGNORE INTO video_tags(video_id, tag_type, tag_value, tag_norm, video_rowid)
-      SELECT
-        ? AS video_id,
-        json_extract(j.value, '$.type') AS tag_type,
-        json_extract(j.value, '$.value') AS tag_value,
-        json_extract(j.value, '$.norm') AS tag_norm,
-        v.id AS video_rowid
+      SELECT ?, ?, ?, ?, v.id
       FROM videos AS v
-      JOIN json_each(?) AS j
       WHERE v.video_id = ?
-        AND json_extract(j.value, '$.type') IN ('tag', 'hashtag')
-        AND COALESCE(json_extract(j.value, '$.norm'), '') <> ''
-    `).bind(videoId, JSON.stringify(chunk), videoId));
+      LIMIT 1
+    `).bind(videoId, item.type, item.value, item.norm, videoId));
   }
 
   return stmts;
