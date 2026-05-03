@@ -148,7 +148,7 @@ export async function fetchVideoMeta(env, ids){
     u.searchParams.set("id", chunk.join(","));
     u.searchParams.set("maxWidth", "8192");
     u.searchParams.set("maxHeight", "8192");
-    u.searchParams.set("fields", "items(id,snippet(publishedAt,channelId,title,description,tags,categoryId,defaultLanguage,defaultAudioLanguage,liveBroadcastContent),statistics(viewCount,likeCount,commentCount),contentDetails(duration),liveStreamingDetails,player(embedWidth,embedHeight))");
+    // לא מגבילים עם fields: part=snippet כבר כולל tags, וזה עדיין אותה קריאת videos.list אחת.
     u.searchParams.set("key", env.YT_API_KEY);
 
     const data = await ytJson(u.toString());
