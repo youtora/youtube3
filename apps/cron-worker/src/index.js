@@ -980,6 +980,7 @@ async function backfillSome(env, maxCalls=1){
           `backfillSome page_items=${videos.length} ` +
           `video_rows=${writeResult.videoRows} ` +
           `meta_rows=${writeResult.metaRows} ` +
+          `tag_rows=${writeResult.tagRows} ` +
           `skipped=${writeResult.skipped} ` +
           `db_videos=${check?.videos_in_db ?? null} ` +
           `oldest=${check?.oldest_published ?? null} ` +
@@ -1021,14 +1022,37 @@ async function backfillSome(env, maxCalls=1){
 async function refreshMissingDetailsSome(env, limit=3){
   if(!env.YT_API_KEY) return;
 
+  // רענון קטן ומתון גם לסרטונים שכבר יש להם video_details אבל התגיות עדיין ריקות.
+  // זה חשוב כי לפעמים הסרטון נכנס לאתר לפני ש-YouTube Data API מחזיר snippet.tags,
+  // או לפני שהתגיות עודכנו ב-YouTube Studio.
+  const retryEmptyTagsHours = intFromEnv(env.CRON_RETRY_EMPTY_TAGS_HOURS, 1, 0, 24 * 30);
+  const retryBefore = nowSec() - (retryEmptyTagsHours * 3600);
+
   const rows = await env.DB.prepare(`
     SELECT v.video_id
     FROM videos v
-    LEFT JOIN video_details d ON d.video_id = v.video_id
+    LEFT JOIN video_details d
+      ON d.video_id = v.video_id
+    LEFT JOIN video_tags t
+      ON t.video_id = v.video_id
     WHERE d.video_id IS NULL
+       OR (
+         COALESCE(v.stats_fetched_at, 0) < ?
+         AND (
+           COALESCE(d.tags_json, '[]') = '[]'
+           OR (
+             t.video_id IS NULL
+             AND (
+               COALESCE(d.tags_json, '[]') <> '[]'
+               OR COALESCE(d.hashtags_json, '[]') <> '[]'
+             )
+           )
+         )
+       )
+    GROUP BY v.id, v.video_id, v.stats_fetched_at, v.published_at
     ORDER BY COALESCE(v.stats_fetched_at, 0) ASC, v.published_at DESC, v.id DESC
     LIMIT ?
-  `).bind(limit).all();
+  `).bind(retryBefore, limit).all();
 
   const ids = (rows?.results || [])
     .map(r => String(r.video_id || "").trim())
@@ -1369,7 +1393,7 @@ export default {
 
   async scheduled(event, env, ctx){
     env.DB = createDB(env);
-    console.log("youtube4-cron v9 tag-index-from-video-details 2026-05-03");
+    console.log("youtube4-cron v10 retry-empty-tags-and-tag-index 2026-05-03");
 
     ctx.waitUntil((async ()=>{
       const started = nowSec();

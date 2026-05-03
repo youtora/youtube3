@@ -27,10 +27,22 @@ export async function onRequest({ env, request }) {
     : await env.DB.prepare(`
         SELECT v.video_id, v.channel_int, v.language_code
         FROM videos v
-        LEFT JOIN video_details d ON d.video_id = v.video_id
+        LEFT JOIN video_details d
+          ON d.video_id = v.video_id
+        LEFT JOIN video_tags t
+          ON t.video_id = v.video_id
         WHERE d.video_id IS NULL
            OR v.stats_fetched_at IS NULL
            OR v.stats_fetched_at < ?
+           OR COALESCE(d.tags_json, '[]') = '[]'
+           OR (
+             t.video_id IS NULL
+             AND (
+               COALESCE(d.tags_json, '[]') <> '[]'
+               OR COALESCE(d.hashtags_json, '[]') <> '[]'
+             )
+           )
+        GROUP BY v.id, v.video_id, v.channel_int, v.language_code, v.stats_fetched_at, d.tags_json, d.hashtags_json
         ORDER BY COALESCE(v.stats_fetched_at, 0) ASC, v.id ASC
         LIMIT ?
       `).bind(staleBefore, limit).all();
