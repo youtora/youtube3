@@ -182,42 +182,32 @@ function videoTagIndexStmts(env, videoId, tags, hashtags){
     ...uniqueIndexedTags(hashtags, "hashtag", 80)
   ];
 
-  const itemsJson = JSON.stringify(items);
+  const stmts = [
+    env.DB.prepare(`DELETE FROM video_tags WHERE video_id = ?`).bind(videoId)
+  ];
 
-  return [
-    // מוחק רק תגיות שכבר לא קיימות במטא־דאטה החדש.
-    // זה מונע מחיקה+הכנסה מחדש בכל רענון, ולכן גם tag_stats נשאר קל לעדכון.
-    env.DB.prepare(`
-      DELETE FROM video_tags
-      WHERE video_id = ?
-        AND NOT EXISTS (
-          SELECT 1
-          FROM json_each(?) AS j
-          WHERE json_extract(j.value, '$.type') = video_tags.tag_type
-            AND json_extract(j.value, '$.norm') = video_tags.tag_norm
-        )
-    `).bind(videoId, itemsJson),
+  for(let i = 0; i < items.length; i += 50){
+    const chunk = items.slice(i, i + 50);
+    if(!chunk.length) continue;
 
-    // הכנסה אחת מרוכזת דרך JSON במקום UNION ALL דינמי.
-    // זה יציב יותר מול Turso/libSQL וחוסך עשרות שאילתות לכל סרטון.
-    env.DB.prepare(`
+    stmts.push(env.DB.prepare(`
       INSERT OR IGNORE INTO video_tags(video_id, tag_type, tag_value, tag_norm, video_rowid)
       SELECT
-        ?,
-        json_extract(j.value, '$.type'),
-        json_extract(j.value, '$.value'),
-        json_extract(j.value, '$.norm'),
-        v.id
-      FROM json_each(?) AS j
-      JOIN videos AS v
-        ON v.video_id = ?
-      WHERE COALESCE(json_extract(j.value, '$.type'), '') <> ''
-        AND COALESCE(json_extract(j.value, '$.value'), '') <> ''
+        ? AS video_id,
+        json_extract(j.value, '$.type') AS tag_type,
+        json_extract(j.value, '$.value') AS tag_value,
+        json_extract(j.value, '$.norm') AS tag_norm,
+        v.id AS video_rowid
+      FROM videos AS v
+      JOIN json_each(?) AS j
+      WHERE v.video_id = ?
+        AND json_extract(j.value, '$.type') IN ('tag', 'hashtag')
         AND COALESCE(json_extract(j.value, '$.norm'), '') <> ''
-    `).bind(videoId, itemsJson, videoId)
-  ];
-}
+    `).bind(videoId, JSON.stringify(chunk), videoId));
+  }
 
+  return stmts;
+}
 export function videoDetailsStmts(env, videoId, meta, ts){
   const tags = Array.isArray(meta?.tags) ? meta.tags : [];
   const hashtags = Array.isArray(meta?.hashtags) ? meta.hashtags : [];

@@ -1,6 +1,5 @@
 import { getDB } from "../_db.js";
 import { normalizePublicLang } from "../_shared/language.js";
-
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
