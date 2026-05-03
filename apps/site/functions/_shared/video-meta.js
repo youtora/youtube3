@@ -177,28 +177,82 @@ function uniqueIndexedTags(tags, type, maxLen){
 }
 
 function videoTagIndexStmts(env, videoId, tags, hashtags){
-  const items = [
-    ...uniqueIndexedTags(tags, "tag", 120),
-    ...uniqueIndexedTags(hashtags, "hashtag", 80)
+  // בונים את אינדקס התגיות מתוך video_details עצמו.
+  // זה בכוונה לא מסתמך על מערכי JS ולא על bind של JSON,
+  // כדי שאם tags_json / hashtags_json נשמרו — video_tags ייבנה בוודאות מאותו מקור.
+  return [
+    env.DB.prepare(`DELETE FROM video_tags WHERE video_id = ?`).bind(videoId),
+
+    env.DB.prepare(`
+      INSERT OR IGNORE INTO video_tags(video_id, video_rowid, tag_type, tag_value, tag_norm)
+      SELECT
+        d.video_id,
+        v.id,
+        'tag',
+        TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')),
+        LOWER(
+          REPLACE(
+            REPLACE(
+              REPLACE(
+                REPLACE(TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')), '#', ''),
+                '״',
+                '"'
+              ),
+              '׳',
+              ''''
+            ),
+            '’',
+            ''''
+          )
+        )
+      FROM video_details AS d
+      JOIN videos AS v
+        ON v.video_id = d.video_id
+      JOIN json_each(
+        CASE
+          WHEN json_valid(COALESCE(d.tags_json, '')) THEN d.tags_json
+          ELSE '[]'
+        END
+      ) AS j
+      WHERE d.video_id = ?
+        AND TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')) <> ''
+    `).bind(videoId),
+
+    env.DB.prepare(`
+      INSERT OR IGNORE INTO video_tags(video_id, video_rowid, tag_type, tag_value, tag_norm)
+      SELECT
+        d.video_id,
+        v.id,
+        'hashtag',
+        TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')),
+        LOWER(
+          REPLACE(
+            REPLACE(
+              REPLACE(
+                REPLACE(TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')), '#', ''),
+                '״',
+                '"'
+              ),
+              '׳',
+              ''''
+            ),
+            '’',
+            ''''
+          )
+        )
+      FROM video_details AS d
+      JOIN videos AS v
+        ON v.video_id = d.video_id
+      JOIN json_each(
+        CASE
+          WHEN json_valid(COALESCE(d.hashtags_json, '')) THEN d.hashtags_json
+          ELSE '[]'
+        END
+      ) AS j
+      WHERE d.video_id = ?
+        AND TRIM(LTRIM(TRIM(COALESCE(j.value, '')), '#')) <> ''
+    `).bind(videoId)
   ];
-
-  const stmts = [
-    env.DB.prepare(`DELETE FROM video_tags WHERE video_id = ?`).bind(videoId)
-  ];
-
-  for(const item of items){
-    // הכנסה פשוטה ויציבה: בלי UNION, בלי json_each, בלי SQL דינמי.
-    // הטריגר על video_tags יעדכן אוטומטית את tag_stats.
-    stmts.push(env.DB.prepare(`
-      INSERT OR IGNORE INTO video_tags(video_id, tag_type, tag_value, tag_norm, video_rowid)
-      SELECT ?, ?, ?, ?, v.id
-      FROM videos AS v
-      WHERE v.video_id = ?
-      LIMIT 1
-    `).bind(videoId, item.type, item.value, item.norm, videoId));
-  }
-
-  return stmts;
 }
 export function videoDetailsStmts(env, videoId, meta, ts){
   const tags = Array.isArray(meta?.tags) ? meta.tags : [];
