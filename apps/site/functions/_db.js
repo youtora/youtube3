@@ -113,18 +113,47 @@ export function getDB(env) {
     },
 
     async batch(statements) {
+      const stmts = (statements || []).map((statement) => {
+        const stmt = statement?.__toStmt ? statement.__toStmt() : statement;
+
+        return {
+          sql: stmt.sql,
+          args: stmt.args || [],
+        };
+      });
+
+      if (!stmts.length) {
+        return {
+          meta: {
+            changes: 0,
+            last_row_id: 0,
+          },
+        };
+      }
+
+      async function runBatch() {
+        const client = makeClient(env);
+        return client.batch(stmts, "write");
+      }
+
+      let results;
+
+      try {
+        results = await runBatch();
+      } catch (error) {
+        if (!isRetryableLibsql404(error)) {
+          throw error;
+        }
+
+        results = await runBatch();
+      }
+
+      const resultList = Array.isArray(results) ? results : [results];
       let totalChanges = 0;
       let lastRowId = 0;
 
-      for (const statement of statements) {
-        const stmt = statement?.__toStmt ? statement.__toStmt() : statement;
-
-        const rs = await execWithRetry(env, {
-          sql: stmt.sql,
-          args: stmt.args || [],
-        });
-
-        totalChanges += rs?.rowsAffected || 0;
+      for (const rs of resultList) {
+        totalChanges += Number(rs?.rowsAffected || 0);
 
         if (rs?.lastInsertRowid != null) {
           lastRowId = Number(rs.lastInsertRowid);
