@@ -199,7 +199,35 @@ function extractEntries(xml){
   }
   return out;
 }
+async function filterNewVideoRows(env, videos){
+  const clean = (videos || [])
+    .map((row) => ({
+      ...row,
+      vid: String(row?.vid || row?.video_id || row?.videoId || "").trim()
+    }))
+    .filter((row) => row.vid);
 
+  if(!clean.length) return [];
+
+  const existing = new Set();
+
+  for(let i = 0; i < clean.length; i += 50){
+    const part = clean.slice(i, i + 50);
+    const placeholders = part.map(() => "?").join(",");
+
+    const rows = await env.DB.prepare(`
+      SELECT video_id
+      FROM videos
+      WHERE video_id IN (${placeholders})
+    `).bind(...part.map((row) => row.vid)).all();
+
+    for(const row of (rows?.results || [])){
+      if(row?.video_id) existing.add(String(row.video_id));
+    }
+  }
+
+  return clean.filter((row) => !existing.has(row.vid));
+}
 function pickPlaylistThumbVideoId(thumbnails){
   if(!thumbnails) return null;
   const keys = ["maxres","standard","high","medium","default"];
@@ -1193,14 +1221,26 @@ async function catchUpFeeds(env, maxChannels=5){
         }
 
         if(videos.length){
-          const writeResult = await upsertVideosAndMetaDirect(env, videos, now);
-          console.log(
-            `catchUpFeeds inserted/updated ${videos.length} videos ` +
-            `video_rows=${writeResult.videoRows} ` +
-            `meta_rows=${writeResult.metaRows} ` +
-            `skipped=${writeResult.skipped} ` +
-            `channel_int=${ch.id}`
-          );
+          const newVideos = await filterNewVideoRows(env, videos);
+
+          if(!newVideos.length){
+            console.log(
+              `catchUpFeeds skipped existing videos ` +
+              `checked=${videos.length} ` +
+              `channel_int=${ch.id}`
+            );
+          } else {
+            const writeResult = await upsertVideosAndMetaDirect(env, newVideos, now);
+            console.log(
+              `catchUpFeeds inserted new videos ` +
+              `checked=${videos.length} ` +
+              `new=${newVideos.length} ` +
+              `video_rows=${writeResult.videoRows} ` +
+              `meta_rows=${writeResult.metaRows} ` +
+              `skipped=${writeResult.skipped} ` +
+              `channel_int=${ch.id}`
+            );
+          }
         }
       }
     }
