@@ -199,7 +199,16 @@ function extractEntries(xml){
   }
   return out;
 }
-async function filterNewVideoRows(env, videos){
+function safeJsonArrayLength(value){
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed.length : -1;
+  } catch (_) {
+    return -1;
+  }
+}
+
+async function filterVideosNeedingImportOrMeta(env, videos){
   const clean = (videos || [])
     .map((row) => ({
       ...row,
@@ -209,24 +218,75 @@ async function filterNewVideoRows(env, videos){
 
   if(!clean.length) return [];
 
-  const existing = new Set();
+  const known = new Map();
 
   for(let i = 0; i < clean.length; i += 50){
     const part = clean.slice(i, i + 50);
     const placeholders = part.map(() => "?").join(",");
 
     const rows = await env.DB.prepare(`
-      SELECT video_id
-      FROM videos
-      WHERE video_id IN (${placeholders})
+      SELECT
+        v.video_id,
+        v.stats_fetched_at,
+        d.video_id AS details_video_id,
+        d.description,
+        d.tags_json,
+        d.hashtags_json,
+        d.fetched_at
+      FROM videos AS v
+      LEFT JOIN video_details AS d
+        ON d.video_id = v.video_id
+      WHERE v.video_id IN (${placeholders})
     `).bind(...part.map((row) => row.vid)).all();
 
     for(const row of (rows?.results || [])){
-      if(row?.video_id) existing.add(String(row.video_id));
+      if(row?.video_id) known.set(String(row.video_id), row);
     }
   }
 
-  return clean.filter((row) => !existing.has(row.vid));
+  const now = nowSec();
+  const repairEmptyAfterHours = intFromEnv(
+    env.CRON_REPAIR_EMPTY_META_AFTER_HOURS,
+    168,
+    24,
+    720
+  );
+  const repairEmptyAfterSec = repairEmptyAfterHours * 3600;
+
+  return clean.filter((row) => {
+    const current = known.get(row.vid);
+
+    // לא קיים בכלל בטבלת videos: סרטון חדש, חייב ייבוא מלא.
+    if(!current) return true;
+
+    const fetchedAt = Number(current.fetched_at || 0);
+    const statsFetchedAt = Number(current.stats_fetched_at || 0);
+
+    // קיים ב-videos אבל אין שורת video_details: חייב השלמה.
+    if(!current.details_video_id) return true;
+
+    // יש details אבל לא ברור שמטא-דאטה באמת נמשך מיוטיוב.
+    if(!fetchedAt) return true;
+    if(!statsFetchedAt) return true;
+
+    const description = String(current.description || "").trim();
+    const tagsCount = safeJsonArrayLength(current.tags_json);
+    const hashtagsCount = safeJsonArrayLength(current.hashtags_json);
+
+    // JSON שבור/חסר: חייב בנייה מחדש כדי שדפי תגיות/האשטגים לא ייפגעו.
+    if(tagsCount < 0) return true;
+    if(hashtagsCount < 0) return true;
+
+    const oldEnoughForEmptyRepair = (now - fetchedAt) >= repairEmptyAfterSec;
+
+    // אם בעבר נכתב metadata ריק, לא נרענן אותו כל דקה.
+    // ננסה לתקן רק אם עבר מספיק זמן, ברירת מחדל: שבוע.
+    if(oldEnoughForEmptyRepair && !description) return true;
+    if(oldEnoughForEmptyRepair && tagsCount === 0 && hashtagsCount === 0) return true;
+
+    // קיים, יש details, יש fetched_at, והמידע נראה תקין: לדלג ולחסוך Turso.
+    return false;
+  });
 }
 function pickPlaylistThumbVideoId(thumbnails){
   if(!thumbnails) return null;
@@ -994,7 +1054,17 @@ async function backfillSome(env, maxCalls=1){
       }
 
       if(videos.length){
-        const writeResult = await upsertVideosAndMetaDirect(env, videos, now);
+        const videosToWrite = await filterVideosNeedingImportOrMeta(env, videos);
+
+        const writeResult = videosToWrite.length
+          ? await upsertVideosAndMetaDirect(env, videosToWrite, now)
+          : {
+              videoRows: 0,
+              metaRows: 0,
+              tagRows: 0,
+              skipped: videos.length
+            };
+
         totalImported += Number(writeResult.videoRows || 0);
 
         const check = await env.DB.prepare(`
@@ -1008,6 +1078,7 @@ async function backfillSome(env, maxCalls=1){
 
         console.log(
           `backfillSome page_items=${videos.length} ` +
+          `to_write=${videosToWrite.length} ` +
           `video_rows=${writeResult.videoRows} ` +
           `meta_rows=${writeResult.metaRows} ` +
           `tag_rows=${writeResult.tagRows ?? 0} ` +
@@ -1221,20 +1292,20 @@ async function catchUpFeeds(env, maxChannels=5){
         }
 
         if(videos.length){
-          const newVideos = await filterNewVideoRows(env, videos);
+          const videosToWrite = await filterVideosNeedingImportOrMeta(env, videos);
 
-          if(!newVideos.length){
+          if(!videosToWrite.length){
             console.log(
               `catchUpFeeds skipped existing videos ` +
               `checked=${videos.length} ` +
               `channel_int=${ch.id}`
             );
           } else {
-            const writeResult = await upsertVideosAndMetaDirect(env, newVideos, now);
+            const writeResult = await upsertVideosAndMetaDirect(env, videosToWrite, now);
             console.log(
               `catchUpFeeds inserted new videos ` +
               `checked=${videos.length} ` +
-              `new=${newVideos.length} ` +
+              `to_write=${videosToWrite.length} ` +
               `video_rows=${writeResult.videoRows} ` +
               `meta_rows=${writeResult.metaRows} ` +
               `skipped=${writeResult.skipped} ` +
