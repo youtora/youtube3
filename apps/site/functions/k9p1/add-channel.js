@@ -517,7 +517,7 @@ export async function onRequest({ env, request }) {
   const raw_input = String(body.raw_input || "").trim();
   const requested_channel_id = String(body.channel_id || "").trim();
   const playlists_pages = Math.min(Math.max(parseInt(body.playlists_pages || "10", 10), 1), 30);
-  const videos_pages = Math.min(Math.max(parseInt(body.videos_pages || "2", 10), 0), 10);
+  const videos_pages = 0;
   const netfree_default_status = Number(body.netfree_default_status) === 0 ? 0 : 1;
   const show_in_public_channels = Number(body.show_in_public_channels) === 0 ? 0 : 1;
 
