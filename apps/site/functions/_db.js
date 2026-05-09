@@ -131,28 +131,34 @@ export function getDB(env) {
         };
       }
 
-      async function runBatch() {
-        const client = makeClient(env);
-        return client.batch(stmts, "write");
-      }
-
-      let results;
-
-      try {
-        results = await runBatch();
-      } catch (error) {
-        if (!isRetryableLibsql404(error)) {
-          throw error;
-        }
-
-        results = await runBatch();
-      }
-
-      const resultList = Array.isArray(results) ? results : [results];
+      // חשוב: ב-Cloudflare עם @tursodatabase/serverless/compat ראינו שב-client.batch
+      // הפרמטרים של ? עלולים לא להיקשר בפועל, ואז מתקבלת שגיאת
+      // NOT NULL constraint failed: playlists.playlist_id / videos.video_id
+      // למרות שבקוד נשלחו ערכים תקינים. לכן מריצים כאן את ה-batch בצורה בטוחה:
+      // אותה מעטפת D1, אותם bind-ים, אבל execute לכל משפט כדי שה-args לא יאבדו.
+      let client = makeClient(env);
       let totalChanges = 0;
       let lastRowId = 0;
 
-      for (const rs of resultList) {
+      for (const stmt of stmts) {
+        const payload = {
+          sql: stmt.sql,
+          args: stmt.args || [],
+        };
+
+        let rs;
+
+        try {
+          rs = await client.execute(payload);
+        } catch (error) {
+          if (!isRetryableLibsql404(error)) {
+            throw error;
+          }
+
+          client = makeClient(env);
+          rs = await client.execute(payload);
+        }
+
         totalChanges += Number(rs?.rowsAffected || 0);
 
         if (rs?.lastInsertRowid != null) {

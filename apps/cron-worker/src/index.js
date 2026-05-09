@@ -115,12 +115,27 @@ function createDB(env) {
     async batch(statements) {
       await ensureReady();
 
-      const stmts = statements.map((statement) => {
-        if (statement?.__toStmt) return statement.__toStmt();
-        return statement;
+      const stmts = (statements || []).map((statement) => {
+        const stmt = statement?.__toStmt ? statement.__toStmt() : statement;
+
+        return {
+          sql: stmt.sql,
+          args: stmt.args || [],
+        };
       });
 
-      return client.batch(stmts, "write");
+      const results = [];
+
+      // חשוב: לא להשתמש כאן ב-client.batch, כי בסביבת Cloudflare עם compat
+      // ראינו שה-bind של סימני ? עלול ללכת לאיבוד. execute שומר את ה-args תקין.
+      for (const stmt of stmts) {
+        results.push(await execute({
+          sql: stmt.sql,
+          args: stmt.args || [],
+        }));
+      }
+
+      return results;
     },
   };
 }
