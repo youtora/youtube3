@@ -349,7 +349,46 @@ async function importPlaylistsForChannel({ env, DB, channel_int, channel_id, max
   return { ok: true, imported };
 }
 
-async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, channel_language_code = "", netfree_default_status = 1, max_pages = 2 }) {
+function errorMessage(error) {
+  return String(error?.message || error || "");
+}
+
+function isMissingChannelLanguageStore(error) {
+  const msg = errorMessage(error).toLowerCase();
+  return msg.includes("channel_languages") && (
+    msg.includes("no such table") ||
+    msg.includes("no such index") ||
+    msg.includes("not found") ||
+    msg.includes("does not exist")
+  );
+}
+
+async function hasChannelLanguageStore(DB) {
+  try {
+    await DB.prepare(`SELECT 1 FROM channel_languages LIMIT 1`).first();
+    return true;
+  } catch (error) {
+    if (isMissingChannelLanguageStore(error)) return false;
+    throw error;
+  }
+}
+
+async function syncChannelLanguagesSafely({ DB, channel_int, languages, source, warnings }) {
+  try {
+    const langStmts = channelLanguageStmts(DB, channel_int, languages, source || "detected");
+    if (langStmts.length) await DB.batch(langStmts);
+    return true;
+  } catch (error) {
+    warnings.push({
+      step: "channel_languages",
+      error: errorMessage(error),
+      note: "ייבוא הערוץ ממשיך; צריך להריץ את מיגרציית השפות כדי לבנות אינדקס שפות מלא."
+    });
+    return false;
+  }
+}
+
+async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, channel_language_code = "", netfree_default_status = 1, max_pages = 2, language_index_ready = true }) {
   if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0, next_page_token: null, done: 0 };
   if (!uploads_playlist_id) return { ok: false, reason: "missing uploads playlist", imported: 0, next_page_token: null, done: 1 };
 
@@ -412,7 +451,9 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
         lang.language_code, lang.language_source, netfree_default_status, now, now
       ));
 
-      stmts.push(...channelVideoLanguageStmts(DB, channel_int, lang.language_code, lang.language_source));
+      if (language_index_ready) {
+        stmts.push(...channelVideoLanguageStmts(DB, channel_int, lang.language_code, lang.language_source));
+      }
 
       if (metaMap.has(vid)) {
         stmts.push(...videoDetailsStmts(env, vid, meta, now));
@@ -517,7 +558,7 @@ export async function onRequest({ env, request }) {
   const raw_input = String(body.raw_input || "").trim();
   const requested_channel_id = String(body.channel_id || "").trim();
   const playlists_pages = Math.min(Math.max(parseInt(body.playlists_pages || "10", 10), 1), 30);
-  const videos_pages = 0;
+  const videos_pages = Math.min(Math.max(parseInt(body.videos_pages || "2", 10), 0), 10);
   const netfree_default_status = Number(body.netfree_default_status) === 0 ? 0 : 1;
   const show_in_public_channels = Number(body.show_in_public_channels) === 0 ? 0 : 1;
 
@@ -630,9 +671,20 @@ export async function onRequest({ env, request }) {
   if (!ch) return new Response("failed to load channel row", { status: 500 });
   const channel_int = ch.id;
 
-  if (meta.languages_json) {
-    const langStmts = channelLanguageStmts(DB, channel_int, meta.languages || meta.languages_json, meta.language_source || "detected");
-    if (langStmts.length) await DB.batch(langStmts);
+  const warnings = [];
+  let language_index_ready = await hasChannelLanguageStore(DB).catch((error) => {
+    warnings.push({ step: "channel_languages_check", error: errorMessage(error) });
+    return false;
+  });
+
+  if (language_index_ready && meta.languages_json) {
+    language_index_ready = await syncChannelLanguagesSafely({
+      DB,
+      channel_int,
+      languages: meta.languages || meta.languages_json,
+      source: meta.language_source || "detected",
+      warnings
+    });
   }
 
   await DB.prepare(`
@@ -643,8 +695,6 @@ export async function onRequest({ env, request }) {
       done = 0,
       updated_at = excluded.updated_at
   `).bind(channel_int, uploads, t).run();
-
-  const warnings = [];
 
   let websub = { ok: false, skipped: true, reason: "not attempted" };
   try {
@@ -681,6 +731,7 @@ export async function onRequest({ env, request }) {
         channel_language_code: meta.language_code || "",
         netfree_default_status: ch.netfree_default_status ?? netfree_default_status,
         max_pages: videos_pages,
+        language_index_ready,
       });
       if (!videos?.ok) warnings.push({ step: "videos", detail: videos });
     } catch (error) {

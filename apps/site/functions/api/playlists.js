@@ -36,7 +36,16 @@ export async function onRequest({ env, request }) {
         JOIN channels c
           ON c.id = p.channel_int
         WHERE p.id < ?
-          AND c.show_in_public_channels = 1
+          AND (
+            COALESCE(c.show_in_public_channels, 1) = 1
+            OR EXISTS (
+              SELECT 1
+              FROM videos v
+              WHERE v.channel_int = c.id
+                AND v.netfree_status = 1
+              LIMIT 1
+            )
+          )
         ORDER BY p.id DESC
         LIMIT ?
       `).bind(cursorId, limit).all()
@@ -53,7 +62,16 @@ export async function onRequest({ env, request }) {
         FROM playlists p
         JOIN channels c
           ON c.id = p.channel_int
-        WHERE c.show_in_public_channels = 1
+        WHERE (
+          COALESCE(c.show_in_public_channels, 1) = 1
+          OR EXISTS (
+            SELECT 1
+            FROM videos v
+            WHERE v.channel_int = c.id
+              AND v.netfree_status = 1
+            LIMIT 1
+          )
+        )
         ORDER BY p.id DESC
         LIMIT ?
       `).bind(limit).all();

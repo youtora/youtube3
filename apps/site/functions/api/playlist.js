@@ -26,7 +26,16 @@ export async function onRequest({ env, request }) {
     FROM playlists p
     JOIN channels c ON c.id = p.channel_int
     WHERE p.playlist_id = ?
-      AND c.show_in_public_channels = 1
+      AND (
+        COALESCE(c.show_in_public_channels, 1) = 1
+        OR EXISTS (
+          SELECT 1
+          FROM videos v
+          WHERE v.channel_int = c.id
+            AND v.netfree_status = 1
+          LIMIT 1
+        )
+      )
     LIMIT 1
   `).bind(playlist_id).first();
 
