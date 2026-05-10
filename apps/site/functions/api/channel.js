@@ -9,19 +9,44 @@ function intParam(url, name, fallback, min, max) {
   return clamp(Number.isFinite(n) ? n : fallback, min, max);
 }
 
-// cursor format: "<published_or_0>:<row_id>"
-function parseCursor(raw) {
-  const s = (raw || "").trim();
-  if (!s) return { p: null, id: 0 };
+const CHANNEL_SORTS = new Set(["latest", "oldest", "views", "likes"]);
 
-  const [pStr, idStr] = s.split(":");
-  const p = parseInt(pStr || "0", 10);
-  const id = parseInt(idStr || "0", 10);
+function normalizeSort(value) {
+  const sort = String(value || "latest").trim().toLowerCase();
+  return CHANNEL_SORTS.has(sort) ? sort : "latest";
+}
 
-  if (!Number.isFinite(p) || !Number.isFinite(id)) return { p: null, id: 0 };
-  if (id <= 0) return { p: null, id: 0 };
+// cursor formats:
+// latest/oldest: "<published_or_0>:<row_id>"
+// views/likes:   "<score_or_0>:<published_or_0>:<row_id>"
+function parseCursor(raw, sort) {
+  const s = String(raw || "").trim();
+  if (!s) return { score: null, p: null, id: 0 };
 
-  return { p, id };
+  const parts = s.split(":");
+
+  if (sort === "views" || sort === "likes") {
+    if (parts.length !== 3) return { score: null, p: null, id: 0 };
+
+    const score = parseInt(parts[0] || "0", 10);
+    const p = parseInt(parts[1] || "0", 10);
+    const id = parseInt(parts[2] || "0", 10);
+
+    if (!Number.isFinite(score) || !Number.isFinite(p) || !Number.isFinite(id)) return { score: null, p: null, id: 0 };
+    if (id <= 0) return { score: null, p: null, id: 0 };
+
+    return { score, p, id };
+  }
+
+  if (parts.length !== 2) return { score: null, p: null, id: 0 };
+
+  const p = parseInt(parts[0] || "0", 10);
+  const id = parseInt(parts[1] || "0", 10);
+
+  if (!Number.isFinite(p) || !Number.isFinite(id)) return { score: null, p: null, id: 0 };
+  if (id <= 0) return { score: null, p: null, id: 0 };
+
+  return { score: null, p, id };
 }
 
 function parseJson(value, fallback) {
@@ -77,33 +102,78 @@ function channelSelect(includeFull) {
       `;
 }
 
-function videosSql({ kind, hasCursor }) {
-  const cursorSql = hasCursor ? "AND (published_at, id) < (?, ?)" : "";
+function sortParts(sort) {
+  switch (sort) {
+    case "oldest":
+      return {
+        index: "idx_videos_public_channel_lang_latest_cover",
+        kindIndex: "idx_videos_public_channel_kind_lang_latest_cover",
+        cursorSql: "AND (published_at, id) > (?, ?)",
+        orderSql: "published_at ASC, id ASC",
+      };
+    case "views":
+      return {
+        index: "idx_videos_public_channel_lang_views_cover",
+        kindIndex: "idx_videos_public_channel_kind_lang_views_cover",
+        cursorSql: "AND (IFNULL(view_count, 0), published_at, id) < (?, ?, ?)",
+        orderSql: "IFNULL(view_count, 0) DESC, published_at DESC, id DESC",
+      };
+    case "likes":
+      return {
+        index: "idx_videos_public_channel_lang_likes_cover",
+        kindIndex: "idx_videos_public_channel_kind_lang_likes_cover",
+        cursorSql: "AND (IFNULL(like_count, 0), published_at, id) < (?, ?, ?)",
+        orderSql: "IFNULL(like_count, 0) DESC, published_at DESC, id DESC",
+      };
+    case "latest":
+    default:
+      return {
+        index: "idx_videos_public_channel_lang_latest_cover",
+        kindIndex: "idx_videos_public_channel_kind_lang_latest_cover",
+        cursorSql: "AND (published_at, id) < (?, ?)",
+        orderSql: "published_at DESC, id DESC",
+      };
+  }
+}
+
+function videosSql({ kind, sort, hasCursor }) {
+  const parts = sortParts(sort);
+  const cursorSql = hasCursor ? parts.cursorSql : "";
+  const indexName = kind ? parts.kindIndex : parts.index;
 
   if (kind) {
     return `
       SELECT id, video_id, title, published_at, video_kind, duration_sec, view_count, like_count, comment_count, language_code, language_source
-      FROM videos INDEXED BY idx_videos_public_channel_kind_lang_latest_cover
+      FROM videos INDEXED BY ${indexName}
       WHERE channel_int = ?
         AND netfree_status = 1
         AND video_kind = ?
         AND language_code = ?
         ${cursorSql}
-      ORDER BY published_at DESC, id DESC
+      ORDER BY ${parts.orderSql}
       LIMIT ?
     `;
   }
 
   return `
     SELECT id, video_id, title, published_at, video_kind, duration_sec, view_count, like_count, comment_count, language_code, language_source
-    FROM videos INDEXED BY idx_videos_public_channel_lang_latest_cover
+    FROM videos INDEXED BY ${indexName}
     WHERE channel_int = ?
       AND netfree_status = 1
       AND language_code = ?
       ${cursorSql}
-    ORDER BY published_at DESC, id DESC
+    ORDER BY ${parts.orderSql}
     LIMIT ?
   `;
+}
+
+function nextCursor(row, sort) {
+  if (!row) return null;
+
+  if (sort === "views") return `${Number(row.view_count || 0)}:${row.published_at ?? 0}:${row.id}`;
+  if (sort === "likes") return `${Number(row.like_count || 0)}:${row.published_at ?? 0}:${row.id}`;
+
+  return `${row.published_at ?? 0}:${row.id}`;
 }
 
 function mapVideo(r) {
@@ -135,6 +205,7 @@ export async function onRequest({ env, request }) {
 
   const kindRaw = (url.searchParams.get("kind") || "").trim().toUpperCase();
   const kind = (kindRaw === "S" || kindRaw === "L") ? kindRaw : null;
+  const sort = normalizeSort(url.searchParams.get("sort"));
 
   const videos_limit = intParam(url, "videos_limit", 24, 1, 50);
 
@@ -142,8 +213,8 @@ export async function onRequest({ env, request }) {
     url.searchParams.get("videos_cursor") ||
     url.searchParams.get("cursor") || "";
 
-  const { p: cursorP, id: cursorId } = parseCursor(videos_cursor_raw);
-  const hasCursor = cursorP !== null && cursorId > 0;
+  const { score: cursorScore, p: cursorP, id: cursorId } = parseCursor(videos_cursor_raw, sort);
+  const hasCursor = cursorP !== null && cursorId > 0 && ((sort !== "views" && sort !== "likes") || cursorScore !== null);
 
   const chRow = await env.DB.prepare(channelSelect(include_channel || include_playlists))
     .bind(channel_id)
@@ -151,7 +222,7 @@ export async function onRequest({ env, request }) {
 
   if (!chRow) return new Response("not found", { status: 404 });
 
-  const out = { lang };
+  const out = { lang, sort };
   const indexedLanguages = include_channel
     ? await channelIndexedLanguages(env.DB, chRow.id, chRow.languages_json || "[]")
     : [];
@@ -206,10 +277,13 @@ export async function onRequest({ env, request }) {
     const binds = [chRow.id];
     if (kind) binds.push(kind);
     binds.push(lang);
-    if (hasCursor) binds.push(cursorP, cursorId);
+    if (hasCursor) {
+      if (sort === "views" || sort === "likes") binds.push(cursorScore, cursorP, cursorId);
+      else binds.push(cursorP, cursorId);
+    }
     binds.push(videos_limit);
 
-    const vids = await env.DB.prepare(videosSql({ kind, hasCursor }))
+    const vids = await env.DB.prepare(videosSql({ kind, sort, hasCursor }))
       .bind(...binds)
       .all();
 
@@ -219,7 +293,7 @@ export async function onRequest({ env, request }) {
     const last = rows[rows.length - 1];
     out.videos_next_cursor =
       rows.length >= videos_limit && last
-        ? `${last.published_at ?? 0}:${last.id}`
+        ? nextCursor(last, sort)
         : null;
   }
 

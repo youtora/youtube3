@@ -113,6 +113,25 @@ function renderLanguageFilter(activeLang, path, extraParams={}){
   }).join("");
   return '<div class="languageFilter" role="navigation" aria-label="סינון לפי שפה"><span class="languageFilterLabel">שפה:</span>' + links + '</div>';
 }
+const CHANNEL_SORTS = [
+  { value: "latest", label: "חדשים" },
+  { value: "oldest", label: "ישנים" },
+  { value: "views", label: "הכי נצפים" },
+  { value: "likes", label: "הכי הרבה לייקים" },
+];
+function normalizeChannelSort(value){
+  const sort = String(value || "latest").trim().toLowerCase();
+  return CHANNEL_SORTS.some(x => x.value === sort) ? sort : "latest";
+}
+function renderChannelSortFilter(activeSort, path, lang){
+  const active = normalizeChannelSort(activeSort);
+  const links = CHANNEL_SORTS.map(item => {
+    const cls = item.value === active ? "languagePill active" : "languagePill";
+    const params = item.value === "latest" ? {} : { sort: item.value };
+    return '<a class="' + cls + '" href="' + esc(langUrl(path, lang, params)) + '" data-link>' + esc(item.label) + '</a>';
+  }).join("");
+  return '<div class="languageFilter channelSortFilter" role="navigation" aria-label="מיון סרטוני הערוץ"><span class="languageFilterLabel">מיון:</span>' + links + '</div>';
+}
 function normalizeTagName(value){
   return String(value || "")
     .trim()
@@ -1368,6 +1387,7 @@ async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.sear
 
   const activeTab = ["videos", "playlists", "shorts", "live"].includes(tab) ? tab : "videos";
   const lang = currentLang(qs);
+  const sort = normalizeChannelSort(qs.get("sort"));
   const kind = activeTab === "shorts" ? "S" : activeTab === "live" ? "L" : "";
 
   setPage(`<div class="muted">טוען ערוץ…</div>`);
@@ -1381,6 +1401,7 @@ async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.sear
     `&include_videos=${include_videos}` +
     `&videos_limit=24` +
     `&lang=${encodeURIComponent(lang)}` +
+    `&sort=${encodeURIComponent(sort)}` +
     (kind ? `&kind=${encodeURIComponent(kind)}` : "")
   );
 
@@ -1420,12 +1441,13 @@ async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.sear
 
     ${renderChannelInfoBox(ch)}
 
-    ${activeTab !== "playlists" ? renderLanguageFilter(lang, `/${encodeURIComponent(channel_id)}/${activeTab}`) : ``}
+    ${activeTab !== "playlists" ? renderLanguageFilter(lang, `/${encodeURIComponent(channel_id)}/${activeTab}`, sort === "latest" ? {} : { sort }) : ``}
+    ${activeTab !== "playlists" ? renderChannelSortFilter(sort, `/${encodeURIComponent(channel_id)}/${activeTab}`, lang) : ``}
 
     <div class="tabs">
-      <a class="tab ${activeTab==="videos"?"active":""}" href="${langUrl(`/${encodeURIComponent(channel_id)}/videos`, lang)}" data-link>סרטונים</a>
-      <a class="tab ${activeTab==="shorts"?"active":""}" href="${langUrl(`/${encodeURIComponent(channel_id)}/shorts`, lang)}" data-link>שורטים</a>
-      <a class="tab ${activeTab==="live"?"active":""}" href="${langUrl(`/${encodeURIComponent(channel_id)}/live`, lang)}" data-link>שידורים חיים</a>
+      <a class="tab ${activeTab==="videos"?"active":""}" href="${langUrl(`/${encodeURIComponent(channel_id)}/videos`, lang, sort === "latest" ? {} : { sort })}" data-link>סרטונים</a>
+      <a class="tab ${activeTab==="shorts"?"active":""}" href="${langUrl(`/${encodeURIComponent(channel_id)}/shorts`, lang, sort === "latest" ? {} : { sort })}" data-link>שורטים</a>
+      <a class="tab ${activeTab==="live"?"active":""}" href="${langUrl(`/${encodeURIComponent(channel_id)}/live`, lang, sort === "latest" ? {} : { sort })}" data-link>שידורים חיים</a>
       <a class="tab ${activeTab==="playlists"?"active":""}" href="/${encodeURIComponent(channel_id)}/playlists" data-link>פלייליסטים</a>
     </div>
   `;
@@ -1444,7 +1466,7 @@ async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.sear
   }
 
   channelVideosState = {
-    key: `${channel_id}|${kind}|${lang}`,
+    key: `${channel_id}|${kind}|${lang}|${sort}`,
     cursor: data.videos_next_cursor || null,
     loading: false,
     done: !data.videos_next_cursor,
@@ -1478,7 +1500,7 @@ async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.sear
   const hint = document.getElementById("chHint");
   const sentinel = document.getElementById("chSentinel");
 
-  btn.onclick = () => channelLoadMoreVideos(t, ch.channel_id, ch.title, ch.thumbnail_url, kind, lang);
+  btn.onclick = () => channelLoadMoreVideos(t, ch.channel_id, ch.title, ch.thumbnail_url, kind, lang, sort);
 
   const hasIO = typeof IntersectionObserver !== "undefined";
   if (!hasIO && !channelVideosState.done) btn.style.display = "inline-flex";
@@ -1487,16 +1509,17 @@ async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.sear
   if (hasIO && !channelVideosState.done) {
     startInfiniteScroll({
       sentinelEl: sentinel,
-      onNearEnd: () => channelLoadMoreVideos(t, ch.channel_id, ch.title, ch.thumbnail_url, kind, lang),
+      onNearEnd: () => channelLoadMoreVideos(t, ch.channel_id, ch.title, ch.thumbnail_url, kind, lang, sort),
       enabled: true,
       rootMargin: "200px 0px",
     });
   }
 }
 
-async function channelLoadMoreVideos(token, channel_id, channel_title, channel_thumbnail_url, kind="", lang="he"){
+async function channelLoadMoreVideos(token, channel_id, channel_title, channel_thumbnail_url, kind="", lang="he", sort="latest"){
+  sort = normalizeChannelSort(sort);
   if (channelVideosState.loading || channelVideosState.done) return;
-  if (channelVideosState.key !== `${channel_id}|${kind}|${lang}`) return;
+  if (channelVideosState.key !== `${channel_id}|${kind}|${lang}|${sort}`) return;
 
   channelVideosState.loading = true;
 
@@ -1512,6 +1535,7 @@ async function channelLoadMoreVideos(token, channel_id, channel_title, channel_t
     `&include_channel=0&include_playlists=0&include_videos=1` +
     `&videos_limit=24` +
     `&lang=${encodeURIComponent(lang)}` +
+    `&sort=${encodeURIComponent(sort)}` +
     (kind ? `&kind=${encodeURIComponent(kind)}` : "") +
     (channelVideosState.cursor ? `&videos_cursor=${encodeURIComponent(channelVideosState.cursor)}` : "");
 
