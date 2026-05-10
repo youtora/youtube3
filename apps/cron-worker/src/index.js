@@ -1007,7 +1007,7 @@ async function backfillSome(env, maxCalls=1){
   if(!env.YT_API_KEY) return 0;
   let totalImported = 0;
 
-  const pageSize = intFromEnv(env.CRON_BACKFILL_PAGE_SIZE, 1, 1, 1);
+  const pageSize = intFromEnv(env.CRON_BACKFILL_PAGE_SIZE, 2, 1, 2);
 
   const rows = await env.DB.prepare(`
     SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token, c.language_code, c.netfree_default_status
