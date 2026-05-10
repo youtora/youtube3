@@ -68,6 +68,7 @@ function fmtCount(value){
   catch { return String(Math.round(n)); }
 }
 const MIN_VISIBLE_VIEWS = 10; // מציגים צפיות רק מ־10 ומעלה
+const MIN_VISIBLE_LIKES = 10; // מציגים לייקים רק מ־10 ומעלה
 
 function fmtViews(value){
   const n = Number(value);
@@ -77,7 +78,12 @@ function fmtViews(value){
   return s ? `${s} צפיות` : "";
 }
 function fmtLikes(value){
-  const s = fmtCount(value);
+  if(value === null || value === undefined || value === "") return "";
+
+  const n = Number(value);
+  if(!Number.isFinite(n) || n < MIN_VISIBLE_LIKES) return "";
+
+  const s = fmtCount(n);
   return s ? `${s} לייקים` : "";
 }
 function arr(value){
@@ -378,6 +384,7 @@ function renderShortCard(v){
   const relDate = fmtDateRel(v.published_at);
   const duration = fmtDuration(v.duration_sec);
   const views = fmtViews(v.view_count);
+  const likes = fmtLikes(v.like_count);
   const channelHref = v.channel_id ? `/${encodeURIComponent(v.channel_id)}/videos` : "";
   const channelName = v.channel_title || v.channel_id || "";
   const channelThumb = v.channel_thumbnail_url || "";
@@ -409,7 +416,7 @@ function renderShortCard(v){
           }
 
           <div class="videoMetaStack">
-            <div class="videoMetaDate">${esc([relDate, views].filter(Boolean).join(" · "))}</div>
+            <div class="videoMetaDate">${esc([relDate, views, likes].filter(Boolean).join(" · "))}</div>
             ${channelHref
               ? `<a class="videoChannelLink videoChannelBelow shortChannelLink" href="${channelHref}" data-link>${esc(channelName)}</a>`
               : `<div class="videoChannelLink videoChannelBelow shortChannelLink">${esc(channelName)}</div>`
@@ -426,6 +433,7 @@ function renderVideoCard(v){
   const relDate = fmtDateRel(v.published_at);
   const duration = fmtDuration(v.duration_sec);
   const views = fmtViews(v.view_count);
+  const likes = fmtLikes(v.like_count);
   const channelHref = v.channel_id ? `/${encodeURIComponent(v.channel_id)}/videos` : "";
   const channelName = v.channel_title || v.channel_id || "";
   const channelThumb = v.channel_thumbnail_url || "";
@@ -457,7 +465,7 @@ function renderVideoCard(v){
           }
 
           <div class="videoMetaStack">
-            <div class="videoMetaDate">${esc([relDate, views].filter(Boolean).join(" · "))}</div>
+            <div class="videoMetaDate">${esc([relDate, views, likes].filter(Boolean).join(" · "))}</div>
             ${channelHref
               ? `<a class="videoChannelLink videoChannelBelow" href="${channelHref}" data-link>${esc(channelName)}</a>`
               : `<div class="videoChannelLink videoChannelBelow">${esc(channelName)}</div>`
