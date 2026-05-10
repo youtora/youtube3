@@ -1601,16 +1601,17 @@ async function channelLoadMoreVideos(token, channel_id, channel_title, channel_t
 
 /* ---------- VIDEO PAGE ---------- */
 const WATCH_SIDE_TABS = [
+  { key: "discover", label: "לגלות עוד" },
   { key: "more", label: "עוד מהערוץ" },
   { key: "popular", label: "פופולאריים" },
   { key: "playlists", label: "פלייליסטים" }
 ];
 
-let watchSideState = { videoId: "", tab: "more", loading: false, loaded: {} };
+let watchSideState = { videoId: "", tab: "discover", loading: false, loaded: {} };
 
 function normalizeWatchSideTab(tab){
-  const key = String(tab || "more").trim().toLowerCase();
-  return WATCH_SIDE_TABS.some(t => t.key === key) ? key : "more";
+  const key = String(tab || "discover").trim().toLowerCase();
+  return WATCH_SIDE_TABS.some(t => t.key === key) ? key : "discover";
 }
 
 function renderRecoCard(r){
@@ -1687,11 +1688,11 @@ function renderWatchSideShell(){
     <div class="watchSideTitle">סרטונים נוספים</div>
     <div class="watchSideTabs" role="tablist" aria-label="אפשרויות צד הסרטון">
       ${WATCH_SIDE_TABS.map(t => `
-        <button class="watchSideTab ${t.key === "more" ? "active" : ""}"
+        <button class="watchSideTab ${t.key === "discover" ? "active" : ""}"
                 type="button"
                 data-watch-side-tab="${esc(t.key)}"
                 role="tab"
-                aria-selected="${t.key === "more" ? "true" : "false"}">
+                aria-selected="${t.key === "discover" ? "true" : "false"}">
           ${esc(t.label)}
         </button>
       `).join("")}
@@ -1813,7 +1814,7 @@ async function pageVideo(video_id){
       allowfullscreen></iframe>
   `;
 
-  watchSideState = { videoId: v.video_id, tab: "more", loading: false, loaded: {} };
+  watchSideState = { videoId: v.video_id, tab: "discover", loading: false, loaded: {} };
 
   setPage(`
     <div class="watchLayout">
@@ -1862,9 +1863,9 @@ async function pageVideo(video_id){
     </div>
   `);
 
-  watchSideState.loaded.more = { tab: "more", videos: data.recommended || [] };
+  watchSideState.loaded.discover = { tab: "discover", videos: data.recommended || [] };
   hookWatchSideTabs(v.video_id);
-  renderWatchSideContent("more", watchSideState.loaded.more);
+  renderWatchSideContent("discover", watchSideState.loaded.discover);
 }
 
 /* ---------- PLAYLIST PAGE ---------- */

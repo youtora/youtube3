@@ -5,8 +5,16 @@ function clamp(n, a, b) {
 }
 
 function normalizeTab(value) {
-  const tab = String(value || "more").trim().toLowerCase();
-  return ["more", "popular", "playlists"].includes(tab) ? tab : "more";
+  const tab = String(value || "discover").trim().toLowerCase();
+  return ["discover", "more", "popular", "playlists"].includes(tab) ? tab : "discover";
+}
+
+const DISCOVER_MAX_AGE_SECONDS = 60 * 60 * 24 * 900;
+
+function makeDiscoverAnchor() {
+  const now = Math.floor(Date.now() / 1000);
+  const minPub = now - DISCOVER_MAX_AGE_SECONDS;
+  return minPub + Math.floor(Math.random() * Math.max(1, now - minPub));
 }
 
 function mapVideo(r, current) {
@@ -19,10 +27,87 @@ function mapVideo(r, current) {
     view_count: r.view_count ?? null,
     like_count: r.like_count ?? null,
     comment_count: r.comment_count ?? null,
-    channel_id: current.channel_id || null,
-    channel_title: current.channel_title || null,
-    channel_thumbnail_url: current.thumbnail_url || null
+    channel_id: r.channel_id || current.channel_id || null,
+    channel_title: r.channel_title || current.channel_title || null,
+    channel_thumbnail_url: r.channel_thumbnail_url || current.thumbnail_url || null
   };
+}
+
+async function loadDiscoverVideos(env, current, limit) {
+  const lang = String(current.language_code || "he").trim() || "he";
+  const anchorPub = makeDiscoverAnchor();
+
+  const rows = await env.DB.prepare(`
+    SELECT
+      v.id,
+      v.video_id,
+      v.title,
+      v.published_at,
+      v.video_kind,
+      v.duration_sec,
+      v.view_count,
+      v.like_count,
+      v.comment_count,
+      c.channel_id,
+      c.title AS channel_title,
+      c.thumbnail_url AS channel_thumbnail_url
+    FROM videos AS v INDEXED BY idx_videos_public_lang_latest_cover
+    LEFT JOIN channels c
+      ON c.id = v.channel_int
+    WHERE v.netfree_status = 1
+      AND v.language_code = ?
+      AND v.published_at <= ?
+      AND v.channel_int <> ?
+      AND v.id <> ?
+    ORDER BY v.published_at DESC, v.id DESC
+    LIMIT ?
+  `).bind(lang, anchorPub, current.channel_int, current.id, limit).all();
+
+  const seen = new Set();
+  const out = [];
+
+  for (const r of rows.results || []) {
+    if (!r?.video_id || seen.has(r.video_id)) continue;
+    seen.add(r.video_id);
+    out.push(mapVideo(r, current));
+  }
+
+  if (out.length >= limit) return out.slice(0, limit);
+
+  const fallback = await env.DB.prepare(`
+    SELECT
+      v.id,
+      v.video_id,
+      v.title,
+      v.published_at,
+      v.video_kind,
+      v.duration_sec,
+      v.view_count,
+      v.like_count,
+      v.comment_count,
+      c.channel_id,
+      c.title AS channel_title,
+      c.thumbnail_url AS channel_thumbnail_url
+    FROM videos AS v INDEXED BY idx_videos_public_lang_latest_cover
+    LEFT JOIN channels c
+      ON c.id = v.channel_int
+    WHERE v.netfree_status = 1
+      AND v.language_code = ?
+      AND v.published_at > ?
+      AND v.channel_int <> ?
+      AND v.id <> ?
+    ORDER BY v.published_at DESC, v.id DESC
+    LIMIT ?
+  `).bind(lang, anchorPub, current.channel_int, current.id, limit - out.length).all();
+
+  for (const r of fallback.results || []) {
+    if (!r?.video_id || seen.has(r.video_id)) continue;
+    seen.add(r.video_id);
+    out.push(mapVideo(r, current));
+    if (out.length >= limit) break;
+  }
+
+  return out;
 }
 
 export async function onRequest({ env, request }) {
@@ -55,6 +140,14 @@ export async function onRequest({ env, request }) {
   if (!current || !current.channel_int) return Response.json({ error: "not found" }, { status: 404 });
 
   const lang = String(current.language_code || "he").trim() || "he";
+
+  if (tab === "discover") {
+    const videos = await loadDiscoverVideos(env, current, limit);
+    return Response.json(
+      { tab, videos },
+      { headers: { "cache-control": "public, max-age=120" } }
+    );
+  }
 
   if (tab === "playlists") {
     const rows = await env.DB.prepare(`
