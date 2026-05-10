@@ -87,7 +87,7 @@ export async function onRequest({ env, request }) {
   }
 
   const orderSql = tab === "popular"
-    ? "view_count DESC, published_at DESC, id DESC"
+    ? "IFNULL(view_count, 0) DESC, published_at DESC, id DESC"
     : "published_at DESC, id DESC";
 
   const rows = await env.DB.prepare(`
