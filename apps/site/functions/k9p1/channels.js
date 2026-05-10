@@ -2,6 +2,13 @@ import { getDB } from "../_db.js";
 // functions/admin/channels.js
 
 function unauthorized() { return new Response("unauthorized", { status: 401 }); }
+function nowSec() { return Math.floor(Date.now() / 1000); }
+function json(data, status = 200) {
+  return Response.json(data, {
+    status,
+    headers: { "cache-control": "no-store" }
+  });
+}
 
 export async function onRequest({ env, request }) {
 
@@ -45,7 +52,9 @@ export async function onRequest({ env, request }) {
     const channel_id = (body.channel_id || "").trim();
     if (!channel_id) return new Response("missing channel_id", { status: 400 });
 
-    if (action !== "purge") return new Response("unsupported action", { status: 400 });
+    if (!["purge", "set_netfree_status"].includes(action)) {
+      return new Response("unsupported action", { status: 400 });
+    }
 
     const ch = await env.DB.prepare(`
       SELECT id
@@ -56,6 +65,59 @@ export async function onRequest({ env, request }) {
 
     if (!ch?.id) return new Response("not found", { status: 404 });
     const channel_int = ch.id;
+
+    if (action === "set_netfree_status") {
+      const target_status = Number(body.netfree_default_status ?? body.status);
+
+      if (![0, 1].includes(target_status)) {
+        return json({ ok: false, error: "invalid netfree_default_status. use 0 or 1" }, 400);
+      }
+
+      const t = nowSec();
+      const show_in_public_channels = target_status === 1 ? 1 : 0;
+
+      const chUpdate = await env.DB.prepare(`
+        UPDATE channels
+        SET
+          netfree_default_status = ?,
+          show_in_public_channels = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).bind(target_status, show_in_public_channels, t, channel_int).run();
+
+      const videoUpdate = target_status === 1
+        ? await env.DB.prepare(`
+          UPDATE videos
+          SET
+            netfree_status = 1,
+            netfree_recheck_after = NULL,
+            updated_at = ?
+          WHERE channel_int = ?
+            AND COALESCE(netfree_status, -1) <> 1
+        `).bind(t, channel_int).run()
+        : await env.DB.prepare(`
+          UPDATE videos
+          SET
+            netfree_status = 0,
+            netfree_recheck_after = NULL,
+            netfree_discovered_at = COALESCE(published_at, netfree_discovered_at, updated_at, ?),
+            updated_at = ?
+          WHERE channel_int = ?
+            AND COALESCE(netfree_status, -1) <> 0
+        `).bind(t, t, channel_int).run();
+
+      return json({
+        ok: true,
+        action,
+        channel_id,
+        netfree_default_status: target_status,
+        show_in_public_channels,
+        changed: {
+          channels: chUpdate?.meta?.changes || 0,
+          videos: videoUpdate?.meta?.changes || 0
+        }
+      });
+    }
 
     // ⚠️ מחיקה מלאה: ילדים -> הורה (כדי לא להיתקע עם FK)
     // video_fts: אם הוא מוגדר עם טריגרים על videos, ייתכן שלא צריך למחוק ידנית.

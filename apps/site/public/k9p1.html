@@ -317,6 +317,12 @@ https://www.youtube.com/c/SomeChannel"
               <td style="padding:8px">${fmtTs(c.updated_at)}</td>
               <td style="padding:8px;text-align:left">
                 <button
+                  onclick="toggleChannelNetfree('${esc(c.channel_id)}', ${Number(c.netfree_default_status) === 0 ? 1 : 0})"
+                  style="background:#0f766e;color:#fff;border:0;border-radius:10px;padding:8px 10px;cursor:pointer;margin-left:6px"
+                >
+                  הפוך ל${Number(c.netfree_default_status) === 0 ? "פתוח" : "מעורב"}
+                </button>
+                <button
                   onclick="purgeChannel('${esc(c.channel_id)}')"
                   style="background:#b00;color:#fff;border:0;border-radius:10px;padding:8px 10px;cursor:pointer"
                 >
@@ -537,6 +543,38 @@ https://www.youtube.com/c/SomeChannel"
     out({ status: res.status, data });
 
     if(res.ok && data?.ok){
+      loadNetfreeQueue();
+    }
+  }
+
+  async function toggleChannelNetfree(channel_id, target_status){
+    const target = Number(target_status) === 0 ? 0 : 1;
+    const message = target === 0
+      ? "להפוך את הערוץ למעורב / לבדיקה? כל הסרטונים של הערוץ יסומנו מחדש כממתינים לבדיקה ויוסתרו עד בדיקה."
+      : "להפוך את הערוץ לפתוח לגמרי? כל הסרטונים של הערוץ יסומנו כפתוחים ויוצגו באתר.";
+
+    if(!confirm(message)) return;
+
+    const res = await fetch("/k9p1/channels", {
+      method:"POST",
+      headers:{ "content-type":"application/json" },
+      body:JSON.stringify({
+        action:"set_netfree_status",
+        channel_id,
+        netfree_default_status: target
+      })
+    });
+
+    const text = await res.text();
+    let data;
+
+    try{ data = JSON.parse(text); }
+    catch{ data = text; }
+
+    out({ status: res.status, data });
+
+    if(res.ok && data?.ok){
+      loadChannels();
       loadNetfreeQueue();
     }
   }
