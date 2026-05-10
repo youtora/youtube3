@@ -9,12 +9,47 @@ function normalizeTab(value) {
   return ["discover", "more", "popular", "playlists"].includes(tab) ? tab : "discover";
 }
 
-const DISCOVER_MAX_AGE_SECONDS = 60 * 60 * 24 * 900;
+const DISCOVER_BANDS_DAYS = [
+  [3, 21],
+  [22, 90],
+  [120, 270],
+  [300, 540],
+  [600, 1000]
+];
 
-function makeDiscoverAnchor() {
+function hashString(s) {
+  let h = 2166136261;
+
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+
+  return h >>> 0;
+}
+
+function makeDiscoverBands(videoId) {
   const now = Math.floor(Date.now() / 1000);
-  const minPub = now - DISCOVER_MAX_AGE_SECONDS;
-  return minPub + Math.floor(Math.random() * Math.max(1, now - minPub));
+  const day = 60 * 60 * 24;
+
+  // מתחלף פעם בשבוע: מספיק מגוון, ועדיין מתאים לקאש.
+  const weekBucket = Math.floor(now / (day * 7));
+  const keyBase = `${videoId || "video"}:${weekBucket}`;
+
+  return DISCOVER_BANDS_DAYS.map(([minDays, maxDays], idx) => {
+    const minAge = minDays * day;
+    const maxAge = maxDays * day;
+    const spread = Math.max(1, maxAge - minAge);
+    const jump = hashString(`${keyBase}:${idx}`) % spread;
+    const anchorPub = now - minAge - jump;
+    const minPub = now - maxAge;
+
+    return {
+      part: idx + 1,
+      minPub,
+      anchorPub
+    };
+  });
 }
 
 function mapVideo(r, current) {
@@ -35,34 +70,45 @@ function mapVideo(r, current) {
 
 async function loadDiscoverVideos(env, current, limit) {
   const lang = String(current.language_code || "he").trim() || "he";
-  const anchorPub = makeDiscoverAnchor();
+  const bands = makeDiscoverBands(current.video_id);
+  const perBand = 2;
 
-  const rows = await env.DB.prepare(`
-    SELECT
-      v.id,
-      v.video_id,
-      v.title,
-      v.published_at,
-      v.video_kind,
-      v.duration_sec,
-      v.view_count,
-      v.like_count,
-      v.comment_count,
-      c.channel_id,
-      c.title AS channel_title,
-      c.thumbnail_url AS channel_thumbnail_url
-    FROM videos AS v INDEXED BY idx_videos_public_lang_latest_cover
-    LEFT JOIN channels c
-      ON c.id = v.channel_int
-    WHERE v.netfree_status = 1
-      AND v.language_code = ?
-      AND v.published_at <= ?
-      AND v.channel_int <> ?
-      AND v.id <> ?
-    ORDER BY v.published_at DESC, v.id DESC
-    LIMIT ?
-  `).bind(lang, anchorPub, current.channel_int, current.id, limit).all();
+  const selectSql = bands.map((_, idx) => `
+    SELECT *
+    FROM (
+      SELECT
+        ${idx + 1} AS part,
+        v.id,
+        v.video_id,
+        v.title,
+        v.published_at,
+        v.video_kind,
+        v.duration_sec,
+        v.view_count,
+        v.like_count,
+        v.comment_count,
+        c.channel_id,
+        c.title AS channel_title,
+        c.thumbnail_url AS channel_thumbnail_url
+      FROM videos AS v INDEXED BY idx_videos_public_lang_latest_cover
+      LEFT JOIN channels c
+        ON c.id = v.channel_int
+      WHERE v.netfree_status = 1
+        AND v.language_code = ?
+        AND v.published_at <= ?
+        AND v.published_at >= ?
+        AND v.id <> ?
+      ORDER BY v.published_at DESC, v.id DESC
+      LIMIT ?
+    )
+  `).join("\nUNION ALL\n");
 
+  const bindValues = [];
+  for (const band of bands) {
+    bindValues.push(lang, band.anchorPub, band.minPub, current.id, perBand);
+  }
+
+  const rows = await env.DB.prepare(selectSql).bind(...bindValues).all();
   const seen = new Set();
   const out = [];
 
@@ -70,44 +116,10 @@ async function loadDiscoverVideos(env, current, limit) {
     if (!r?.video_id || seen.has(r.video_id)) continue;
     seen.add(r.video_id);
     out.push(mapVideo(r, current));
-  }
-
-  if (out.length >= limit) return out.slice(0, limit);
-
-  const fallback = await env.DB.prepare(`
-    SELECT
-      v.id,
-      v.video_id,
-      v.title,
-      v.published_at,
-      v.video_kind,
-      v.duration_sec,
-      v.view_count,
-      v.like_count,
-      v.comment_count,
-      c.channel_id,
-      c.title AS channel_title,
-      c.thumbnail_url AS channel_thumbnail_url
-    FROM videos AS v INDEXED BY idx_videos_public_lang_latest_cover
-    LEFT JOIN channels c
-      ON c.id = v.channel_int
-    WHERE v.netfree_status = 1
-      AND v.language_code = ?
-      AND v.published_at > ?
-      AND v.channel_int <> ?
-      AND v.id <> ?
-    ORDER BY v.published_at DESC, v.id DESC
-    LIMIT ?
-  `).bind(lang, anchorPub, current.channel_int, current.id, limit - out.length).all();
-
-  for (const r of fallback.results || []) {
-    if (!r?.video_id || seen.has(r.video_id)) continue;
-    seen.add(r.video_id);
-    out.push(mapVideo(r, current));
     if (out.length >= limit) break;
   }
 
-  return out;
+  return out.slice(0, limit);
 }
 
 export async function onRequest({ env, request }) {
