@@ -10,22 +10,43 @@ function intParam(url, name, fallback, min, max) {
   return clamp(Number.isFinite(n) ? n : fallback, min, max);
 }
 
-// cursor format: "<published_at>:<id>"
-function parseCursor(raw) {
+function normalizeSort(value) {
+  const sort = String(value || "latest").trim().toLowerCase();
+  return sort === "views" ? "views" : "latest";
+}
+
+// latest cursor format: "<published_at>:<id>"
+// views cursor format:  "<view_count>:<published_at>:<id>"
+function parseCursor(raw, sort) {
   const s = (raw || "").trim();
-  if (!s) return { p: null, id: null };
+  if (!s) return { views: null, p: null, id: null };
 
   const parts = s.split(":");
-  if (parts.length !== 2) return { p: null, id: null };
+
+  if (sort === "views") {
+    if (parts.length !== 3) return { views: null, p: null, id: null };
+
+    const views = parseInt(parts[0] || "0", 10);
+    const p = parseInt(parts[1] || "0", 10);
+    const id = parseInt(parts[2] || "0", 10);
+
+    if (!Number.isFinite(views) || !Number.isFinite(p) || !Number.isFinite(id) || id <= 0) {
+      return { views: null, p: null, id: null };
+    }
+
+    return { views, p, id };
+  }
+
+  if (parts.length !== 2) return { views: null, p: null, id: null };
 
   const p = parseInt(parts[0] || "0", 10);
   const id = parseInt(parts[1] || "0", 10);
 
   if (!Number.isFinite(p) || !Number.isFinite(id) || id <= 0) {
-    return { p: null, id: null };
+    return { views: null, p: null, id: null };
   }
 
-  return { p, id };
+  return { views: null, p, id };
 }
 
 function mapVideoRow(r) {
@@ -46,10 +67,31 @@ function mapVideoRow(r) {
   };
 }
 
-function selectSql({ kind, cursor }) {
-  const cursorSql = cursor ? "AND (v.published_at, v.id) < (?, ?)" : "";
+function sortParts(sort) {
+  if (sort === "views") {
+    return {
+      index: "idx_videos_public_lang_views",
+      kindIndex: "idx_videos_public_kind_lang_views",
+      minViewsSql: "AND v.view_count >= 2000",
+      cursorSql: "AND (v.view_count, v.published_at, v.id) < (?, ?, ?)",
+      orderSql: "v.view_count DESC, v.published_at DESC, v.id DESC"
+    };
+  }
+
+  return {
+    index: "idx_videos_public_lang_latest_cover",
+    kindIndex: "idx_videos_public_kind_lang_latest_cover",
+    minViewsSql: "",
+    cursorSql: "AND (v.published_at, v.id) < (?, ?)",
+    orderSql: "v.published_at DESC, v.id DESC"
+  };
+}
+
+function selectSql({ kind, sort, cursor }) {
+  const parts = sortParts(sort);
+  const cursorSql = cursor ? parts.cursorSql : "";
   const kindSql = kind ? "AND v.video_kind = ?" : "";
-  const indexName = kind ? "idx_videos_public_kind_lang_latest_cover" : "idx_videos_public_lang_latest_cover";
+  const indexName = kind ? parts.kindIndex : parts.index;
 
   return `
     SELECT
@@ -73,8 +115,9 @@ function selectSql({ kind, cursor }) {
     WHERE v.netfree_status = 1
       AND v.language_code = ?
       ${kindSql}
+      ${parts.minViewsSql}
       ${cursorSql}
-    ORDER BY v.published_at DESC, v.id DESC
+    ORDER BY ${parts.orderSql}
     LIMIT ?
   `;
 }
@@ -85,21 +128,26 @@ export async function onRequest({ env, request }) {
 
   const limit = intParam(url, "limit", 24, 1, 50);
   const lang = normalizePublicLang(url.searchParams.get("lang") || "he", "he");
+  const sort = normalizeSort(url.searchParams.get("sort") || "latest");
 
   const kindRaw = (url.searchParams.get("kind") || "").trim().toUpperCase();
   const kind = (kindRaw === "S" || kindRaw === "L") ? kindRaw : null;
 
-  const { p: cursorP, id: cursorId } = parseCursor(
-    url.searchParams.get("cursor") || ""
+  const { views: cursorViews, p: cursorP, id: cursorId } = parseCursor(
+    url.searchParams.get("cursor") || "",
+    sort
   );
-  const hasCursor = cursorP !== null && cursorId !== null;
+  const hasCursor = cursorP !== null && cursorId !== null && (sort !== "views" || cursorViews !== null);
 
   const binds = [lang];
   if (kind) binds.push(kind);
-  if (hasCursor) binds.push(cursorP, cursorId);
+  if (hasCursor) {
+    if (sort === "views") binds.push(cursorViews, cursorP, cursorId);
+    else binds.push(cursorP, cursorId);
+  }
   binds.push(limit);
 
-  const rows = await env.DB.prepare(selectSql({ kind, cursor: hasCursor }))
+  const rows = await env.DB.prepare(selectSql({ kind, sort, cursor: hasCursor }))
     .bind(...binds)
     .all();
 
@@ -109,11 +157,13 @@ export async function onRequest({ env, request }) {
   const last = vrows[vrows.length - 1];
   const next_cursor =
     vrows.length >= limit && last
-      ? `${last.published_at ?? 0}:${last.id}`
+      ? sort === "views"
+        ? `${last.view_count ?? 0}:${last.published_at ?? 0}:${last.id}`
+        : `${last.published_at ?? 0}:${last.id}`
       : null;
 
   return Response.json(
-    { videos, next_cursor, lang },
+    { videos, next_cursor, lang, sort },
     { headers: { "cache-control": "public, max-age=60" } }
   );
 }

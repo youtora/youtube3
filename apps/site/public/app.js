@@ -138,6 +138,24 @@ function renderChannelSortFilter(activeSort, path, lang){
   }).join("");
   return '<div class="languageFilter channelSortFilter" role="navigation" aria-label="מיון סרטוני הערוץ"><span class="languageFilterLabel">מיון:</span>' + links + '</div>';
 }
+
+const LATEST_SORTS = [
+  { value: "latest", label: "חדשים" },
+  { value: "views", label: "הכי נצפים" },
+];
+function normalizeLatestSort(value){
+  const sort = String(value || "latest").trim().toLowerCase();
+  return LATEST_SORTS.some(x => x.value === sort) ? sort : "latest";
+}
+function renderLatestSortFilter(activeSort, path, lang){
+  const active = normalizeLatestSort(activeSort);
+  const links = LATEST_SORTS.map(item => {
+    const cls = item.value === active ? "languagePill active" : "languagePill";
+    const params = item.value === "latest" ? {} : { sort: item.value };
+    return '<a class="' + cls + '" href="' + esc(langUrl(path, lang, params)) + '" data-link>' + esc(item.label) + '</a>';
+  }).join("");
+  return '<div class="languageFilter channelSortFilter" role="navigation" aria-label="מיון סרטונים כלליים"><span class="languageFilterLabel">מיון:</span>' + links + '</div>';
+}
 function normalizeTagName(value){
   return String(value || "")
     .trim()
@@ -514,7 +532,7 @@ function startInfiniteScroll({ sentinelEl, onNearEnd, enabled = true, rootMargin
 }
 
 /* ---------- LATEST PAGES: home / shorts / live ---------- */
-let latestState = { kind: "", lang: "he", cursor: null, loading: false, done: false, token: 0 };
+let latestState = { kind: "", lang: "he", sort: "latest", cursor: null, loading: false, done: false, token: 0 };
 
 function latestPageMeta(kind){
   if(kind === "S") return { title: "שורטים", sub: "השורטים האחרונים מכל הערוצים" };
@@ -524,7 +542,9 @@ function latestPageMeta(kind){
 
 async function pageLatest(kind="", qs=new URLSearchParams(location.search)){
   const lang = currentLang(qs);
-  latestState = { kind, lang, cursor: null, loading: false, done: false, token: latestState.token + 1 };
+  const sort = normalizeLatestSort(qs.get("sort"));
+  const path = kind === "S" ? "/shorts" : kind === "L" ? "/live" : "/";
+  latestState = { kind, lang, sort, cursor: null, loading: false, done: false, token: latestState.token + 1 };
   const t = latestState.token;
   const meta = latestPageMeta(kind);
   applyRouteMeta(latestSeo(kind));
@@ -532,7 +552,8 @@ async function pageLatest(kind="", qs=new URLSearchParams(location.search)){
   setPage(`
     <div class="h1">${esc(meta.title)}</div>
     <p class="sub">${esc(meta.sub)} · ${esc(languageName(lang))}</p>
-    ${renderLanguageFilter(lang, kind === "S" ? "/shorts" : kind === "L" ? "/live" : "/")}
+    ${renderLanguageFilter(lang, path, sort === "latest" ? {} : { sort })}
+    ${renderLatestSortFilter(sort, path, lang)}
     <div class="hr"></div>
 
     <div id="latestGrid" class="${kind === "S" ? "shortsGrid" : "grid"}"></div>
@@ -582,6 +603,7 @@ async function latestLoadMore(token){
   const url =
     `/api/latest?limit=24` +
     `&lang=${encodeURIComponent(latestState.lang)}` +
+    `&sort=${encodeURIComponent(latestState.sort)}` +
     (latestState.kind ? `&kind=${encodeURIComponent(latestState.kind)}` : "") +
     (latestState.cursor ? `&cursor=${encodeURIComponent(latestState.cursor)}` : "");
 
