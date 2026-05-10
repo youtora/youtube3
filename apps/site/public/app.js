@@ -1600,13 +1600,179 @@ async function channelLoadMoreVideos(token, channel_id, channel_title, channel_t
 }
 
 /* ---------- VIDEO PAGE ---------- */
+const WATCH_SIDE_TABS = [
+  { key: "more", label: "עוד מהערוץ" },
+  { key: "popular", label: "פופולאריים" },
+  { key: "playlists", label: "פלייליסטים" }
+];
+
+let watchSideState = { videoId: "", tab: "more", loading: false, loaded: {} };
+
+function normalizeWatchSideTab(tab){
+  const key = String(tab || "more").trim().toLowerCase();
+  return WATCH_SIDE_TABS.some(t => t.key === key) ? key : "more";
+}
+
+function renderRecoCard(r){
+  return `
+    <article class="recoCard">
+      <a class="recoThumbLink" href="/${encodeURIComponent(r.video_id)}" data-link>
+        <span class="recoThumbWrap">
+          <img class="recoThumb" loading="lazy" decoding="async" src="${esc(ytVideoThumb(r.video_id))}">
+          ${fmtDuration(r.duration_sec) ? `<span class="thumbBadge thumbBadgeSm">${esc(fmtDuration(r.duration_sec))}</span>` : ``}
+        </span>
+      </a>
+
+      <div class="recoBody">
+        <a class="recoTitleLink" href="/${encodeURIComponent(r.video_id)}" data-link>
+          <span class="recoTitle">${esc(r.title || r.video_id)}</span>
+        </a>
+
+        <span class="recoMetaBlock">
+          ${r.channel_id
+            ? `<a class="recoAvatarLink" href="/${encodeURIComponent(r.channel_id)}/videos" data-link>`
+            : `<span class="recoAvatarLink">`
+          }
+            ${r.channel_thumbnail_url
+              ? `<img class="recoAvatar" loading="lazy" decoding="async" src="${esc(r.channel_thumbnail_url)}" onerror="this.style.display='none'">`
+              : `<span class="recoAvatar recoAvatarFallback"></span>`
+            }
+          ${r.channel_id ? `</a>` : `</span>`}
+
+          <span class="recoMetaText">
+            <span class="recoDate">${esc([fmtDateRel(r.published_at), fmtViews(r.view_count)].filter(Boolean).join(" · "))}</span>
+            ${r.channel_id
+              ? `<a class="recoChannel" href="/${encodeURIComponent(r.channel_id)}/videos" data-link>${esc(r.channel_title || r.channel_id || "")}</a>`
+              : `<span class="recoChannel">${esc(r.channel_title || r.channel_id || "")}</span>`
+            }
+          </span>
+        </span>
+      </div>
+    </article>
+  `;
+}
+
+function renderRecoPlaylistCard(p){
+  const count = Number(p.item_count);
+  const countText = Number.isFinite(count) && count > 0 ? `${count} סרטונים` : "פלייליסט";
+  const thumb = p.thumb_video_id ? ytVideoThumb(p.thumb_video_id) : "";
+
+  return `
+    <article class="recoCard recoPlaylistCard">
+      <a class="recoThumbLink" href="/${encodeURIComponent(p.playlist_id)}" data-link>
+        <span class="recoThumbWrap recoPlaylistThumbWrap">
+          ${thumb
+            ? `<img class="recoThumb" loading="lazy" decoding="async" src="${esc(thumb)}" onerror="this.style.display='none'">`
+            : `<span class="recoThumb recoPlaylistEmptyThumb"></span>`
+          }
+          <span class="playlistTypeBadge">פלייליסט</span>
+        </span>
+      </a>
+
+      <div class="recoBody">
+        <a class="recoTitleLink" href="/${encodeURIComponent(p.playlist_id)}" data-link>
+          <span class="recoTitle">${esc(p.title || p.playlist_id)}</span>
+        </a>
+        <span class="recoMetaText">
+          <span class="recoDate">${esc(countText)}</span>
+          <span class="recoChannel">${esc(p.channel_title || p.channel_id || "")}</span>
+        </span>
+      </div>
+    </article>
+  `;
+}
+
+function renderWatchSideShell(){
+  return `
+    <div class="watchSideTitle">סרטונים נוספים</div>
+    <div class="watchSideTabs" role="tablist" aria-label="אפשרויות צד הסרטון">
+      ${WATCH_SIDE_TABS.map(t => `
+        <button class="watchSideTab ${t.key === "more" ? "active" : ""}"
+                type="button"
+                data-watch-side-tab="${esc(t.key)}"
+                role="tab"
+                aria-selected="${t.key === "more" ? "true" : "false"}">
+          ${esc(t.label)}
+        </button>
+      `).join("")}
+    </div>
+    <div id="watchSideContent" class="watchSideContent">
+      <div class="muted watchSideHint">טוען…</div>
+    </div>
+  `;
+}
+
+function setWatchSideActiveTab(tab){
+  const active = normalizeWatchSideTab(tab);
+  document.querySelectorAll("[data-watch-side-tab]").forEach(btn => {
+    const isActive = btn.getAttribute("data-watch-side-tab") === active;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+}
+
+function renderWatchSideContent(tab, data){
+  const box = document.getElementById("watchSideContent");
+  if (!box) return;
+
+  if (tab === "playlists") {
+    const playlists = data.playlists || [];
+    box.innerHTML = playlists.length
+      ? `<div class="recoList">${playlists.map(renderRecoPlaylistCard).join("")}</div>`
+      : `<div class="muted watchSideHint">אין כרגע פלייליסטים לערוץ הזה.</div>`;
+    return;
+  }
+
+  const videos = data.videos || [];
+  box.innerHTML = videos.length
+    ? `<div class="recoList">${videos.map(renderRecoCard).join("")}</div>`
+    : `<div class="muted watchSideHint">אין כרגע תוצאות להצגה.</div>`;
+}
+
+async function loadWatchSideTab(videoId, tab="more"){
+  const cleanVideoId = String(videoId || "").trim();
+  const activeTab = normalizeWatchSideTab(tab);
+  if (!cleanVideoId) return;
+  if (watchSideState.videoId !== cleanVideoId) return;
+
+  watchSideState.tab = activeTab;
+  setWatchSideActiveTab(activeTab);
+
+  if (watchSideState.loaded[activeTab]) {
+    renderWatchSideContent(activeTab, watchSideState.loaded[activeTab]);
+    return;
+  }
+
+  const box = document.getElementById("watchSideContent");
+  if (box) box.innerHTML = `<div class="muted watchSideHint">טוען…</div>`;
+
+  let data;
+  try {
+    data = await api(`/api/video-sidebar?video_id=${encodeURIComponent(cleanVideoId)}&tab=${encodeURIComponent(activeTab)}&limit=10`);
+  } catch (err) {
+    if (watchSideState.videoId !== cleanVideoId) return;
+    if (box) box.innerHTML = `<div class="muted watchSideHint">שגיאה בטעינה: ${esc(err?.message || String(err))}</div>`;
+    return;
+  }
+
+  if (watchSideState.videoId !== cleanVideoId || watchSideState.tab !== activeTab) return;
+
+  watchSideState.loaded[activeTab] = data;
+  renderWatchSideContent(activeTab, data);
+}
+
+function hookWatchSideTabs(videoId){
+  document.querySelectorAll("[data-watch-side-tab]").forEach(btn => {
+    btn.onclick = () => loadWatchSideTab(videoId, btn.getAttribute("data-watch-side-tab") || "more");
+  });
+}
+
 async function pageVideo(video_id){
   stopActiveObserver();
 
   setPage(`<div class="muted">טוען סרטון…</div>`);
   const data = await api(`/api/video?video_id=${encodeURIComponent(video_id)}`);
   const v = data.video;
-  const rec = data.recommended || [];
   const cleanDescription = String(v.description || "").trim();
   const seoDescription = cleanDescription
     ? cleanDescription.replace(/https?:\/\/\S+/g, "").replace(/\s+/g, " ").trim().slice(0, 165)
@@ -1647,6 +1813,8 @@ async function pageVideo(video_id){
       allowfullscreen></iframe>
   `;
 
+  watchSideState = { videoId: v.video_id, tab: "more", loading: false, loaded: {} };
+
   setPage(`
     <div class="watchLayout">
       <section class="watchMain">
@@ -1664,7 +1832,10 @@ async function pageVideo(video_id){
                             : `<div class="avatar"></div>`}
           <div style="min-width:0">
             <div style="font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-              <a href="/${encodeURIComponent(v.channel_id)}/videos" data-link>${esc(v.channel_title || v.channel_id)}</a>
+              ${v.channel_id
+                ? `<a href="/${encodeURIComponent(v.channel_id)}/videos" data-link>${esc(v.channel_title || v.channel_id)}</a>`
+                : esc(v.channel_title || "ערוץ")
+              }
             </div>
             <div class="muted" style="font-size:12px">ערוץ</div>
           </div>
@@ -1686,46 +1857,14 @@ async function pageVideo(video_id){
       </section>
 
       <aside class="watchSide">
-        <div class="watchSideTitle">סרטונים מוצעים</div>
-        ${rec.length ? `<div class="recoList">${rec.map(r=>`
-          <article class="recoCard">
-            <a class="recoThumbLink" href="/${encodeURIComponent(r.video_id)}" data-link>
-              <span class="recoThumbWrap">
-                <img class="recoThumb" loading="lazy" decoding="async" src="${esc(ytVideoThumb(r.video_id))}">
-                ${fmtDuration(r.duration_sec) ? `<span class="thumbBadge thumbBadgeSm">${esc(fmtDuration(r.duration_sec))}</span>` : ``}
-              </span>
-            </a>
-
-            <div class="recoBody">
-              <a class="recoTitleLink" href="/${encodeURIComponent(r.video_id)}" data-link>
-                <span class="recoTitle">${esc(r.title || r.video_id)}</span>
-              </a>
-
-              <span class="recoMetaBlock">
-                ${r.channel_id
-                  ? `<a class="recoAvatarLink" href="/${encodeURIComponent(r.channel_id)}/videos" data-link>`
-                  : `<span class="recoAvatarLink">`
-                }
-                  ${r.channel_thumbnail_url
-                    ? `<img class="recoAvatar" loading="lazy" decoding="async" src="${esc(r.channel_thumbnail_url)}" onerror="this.style.display='none'">`
-                    : `<span class="recoAvatar recoAvatarFallback"></span>`
-                  }
-                ${r.channel_id ? `</a>` : `</span>`}
-
-                <span class="recoMetaText">
-                  <span class="recoDate">${esc(fmtDateRel(r.published_at) || "")}</span>
-                  ${r.channel_id
-                    ? `<a class="recoChannel" href="/${encodeURIComponent(r.channel_id)}/videos" data-link>${esc(r.channel_title || r.channel_id || "")}</a>`
-                    : `<span class="recoChannel">${esc(r.channel_title || r.channel_id || "")}</span>`
-                  }
-                </span>
-              </span>
-            </div>
-          </article>
-        `).join("")}</div>` : `<div class="muted">אין כרגע המלצות מהמסד.</div>`}
+        ${renderWatchSideShell()}
       </aside>
     </div>
   `);
+
+  watchSideState.loaded.more = { tab: "more", videos: data.recommended || [] };
+  hookWatchSideTabs(v.video_id);
+  renderWatchSideContent("more", watchSideState.loaded.more);
 }
 
 /* ---------- PLAYLIST PAGE ---------- */

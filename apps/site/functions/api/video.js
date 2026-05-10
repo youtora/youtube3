@@ -11,7 +11,7 @@ export async function onRequest({ env, request }) {
   const video_id = (url.searchParams.get("video_id") || "").trim();
   if (!video_id) return new Response("missing video_id", { status: 400 });
 
-  const recLimit = clamp(parseInt(url.searchParams.get("recommended_limit") || "20", 10), 1, 60);
+  const recLimit = clamp(parseInt(url.searchParams.get("recommended_limit") || "10", 10) || 10, 1, 10);
 
   const vrow = await env.DB.prepare(`
     SELECT
@@ -25,6 +25,7 @@ export async function onRequest({ env, request }) {
       v.view_count,
       v.like_count,
       v.comment_count,
+      v.language_code,
       d.description,
       d.tags_json,
       d.hashtags_json,
@@ -53,6 +54,7 @@ export async function onRequest({ env, request }) {
     view_count: vrow.view_count ?? null,
     like_count: vrow.like_count ?? null,
     comment_count: vrow.comment_count ?? null,
+    language_code: vrow.language_code || "",
     description: vrow.description || "",
     tags: parseJsonArray(vrow.tags_json),
     hashtags: parseJsonArray(vrow.hashtags_json),
@@ -61,6 +63,8 @@ export async function onRequest({ env, request }) {
     channel_title: vrow.channel_title || null,
     thumbnail_url: vrow.thumbnail_url || null
   };
+
+  const lang = String(vrow.language_code || "he").trim() || "he";
 
   const rec = await env.DB.prepare(`
     SELECT
@@ -73,13 +77,14 @@ export async function onRequest({ env, request }) {
       view_count,
       like_count,
       comment_count
-    FROM videos INDEXED BY idx_videos_public_channel_latest_cover
+    FROM videos
     WHERE channel_int = ?
       AND netfree_status = 1
       AND video_id <> ?
+      AND language_code = ?
     ORDER BY published_at DESC, id DESC
     LIMIT ?
-  `).bind(vrow.channel_int, video_id, recLimit).all();
+  `).bind(vrow.channel_int, video_id, lang, recLimit).all();
 
   const recommended = (rec.results || []).map(r => ({
     video_id: r.video_id,

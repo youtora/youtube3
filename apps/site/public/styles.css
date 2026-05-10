@@ -1128,6 +1128,45 @@ a:hover{text-decoration:none}
   font-weight:800;
   margin-bottom:12px;
 }
+.watchSideTabs{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin-bottom:14px;
+}
+.watchSideTab{
+  appearance:none;
+  border:1px solid var(--yt-border);
+  background:var(--yt-chip-bg);
+  color:var(--yt-text);
+  border-radius:999px;
+  padding:8px 12px;
+  font:inherit;
+  font-size:13px;
+  font-weight:800;
+  cursor:pointer;
+}
+.watchSideTab:hover{
+  background:var(--soft);
+}
+.watchSideTab.active{
+  background:#111;
+  border-color:#111;
+  color:#fff;
+}
+.watchSideContent{
+  min-height:120px;
+}
+.watchSideHint{
+  padding:10px 2px;
+}
+.recoPlaylistThumbWrap{
+  background:#eee;
+}
+.recoPlaylistEmptyThumb{
+  display:block;
+  background:linear-gradient(135deg, #f1f1f1, #ddd);
+}
 .recoList{
   display:flex;
   flex-direction:column;
