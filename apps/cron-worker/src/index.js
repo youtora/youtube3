@@ -907,25 +907,12 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
 
     try {
       await env.DB.prepare(`
-        INSERT INTO videos(
+        INSERT OR IGNORE INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
           language_code, language_source, netfree_status, netfree_discovered_at, updated_at
         )
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(video_id) DO UPDATE SET
-          channel_int=excluded.channel_int,
-          title=excluded.title,
-          published_at=CASE WHEN excluded.published_at > 0 THEN excluded.published_at ELSE videos.published_at END,
-          video_kind=CASE WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind ELSE videos.video_kind END,
-          duration_sec=CASE WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec ELSE videos.duration_sec END,
-          view_count=CASE WHEN excluded.view_count IS NOT NULL THEN excluded.view_count ELSE videos.view_count END,
-          like_count=CASE WHEN excluded.like_count IS NOT NULL THEN excluded.like_count ELSE videos.like_count END,
-          comment_count=CASE WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count ELSE videos.comment_count END,
-          stats_fetched_at=CASE WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at ELSE videos.stats_fetched_at END,
-          language_code=CASE WHEN excluded.language_code IS NOT NULL AND excluded.language_code <> '' THEN excluded.language_code ELSE videos.language_code END,
-          language_source=CASE WHEN excluded.language_source IS NOT NULL AND excluded.language_source <> '' THEN excluded.language_source ELSE videos.language_source END,
-          updated_at=excluded.updated_at
       `).bind(
         vid,
         row.channel_int,
@@ -942,6 +929,58 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
         row.netfree_default_status,
         ts,
         ts
+      ).run();
+
+      await env.DB.prepare(`
+        UPDATE videos
+        SET
+          title = CASE
+            WHEN ? <> '' THEN ?
+            ELSE title
+          END,
+          video_kind = CASE
+            WHEN ? IS NOT NULL THEN ?
+            ELSE video_kind
+          END,
+          duration_sec = CASE
+            WHEN ? IS NOT NULL THEN ?
+            ELSE duration_sec
+          END,
+          view_count = CASE
+            WHEN ? IS NOT NULL THEN ?
+            ELSE view_count
+          END,
+          like_count = CASE
+            WHEN ? IS NOT NULL THEN ?
+            ELSE like_count
+          END,
+          comment_count = CASE
+            WHEN ? IS NOT NULL THEN ?
+            ELSE comment_count
+          END,
+          stats_fetched_at = CASE
+            WHEN ? IS NOT NULL THEN ?
+            ELSE stats_fetched_at
+          END,
+          updated_at = ?
+        WHERE video_id = ?
+      `).bind(
+        title,
+        title,
+        videoKind,
+        videoKind,
+        meta?.duration_sec ?? null,
+        meta?.duration_sec ?? null,
+        meta?.view_count ?? null,
+        meta?.view_count ?? null,
+        meta?.like_count ?? null,
+        meta?.like_count ?? null,
+        meta?.comment_count ?? null,
+        meta?.comment_count ?? null,
+        meta ? ts : null,
+        meta ? ts : null,
+        ts,
+        vid
       ).run();
 
       const langStmts = channelVideoLanguageStmts(env, row.channel_int, lang.language_code, lang.language_source);
