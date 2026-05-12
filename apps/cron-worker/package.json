@@ -3,6 +3,6 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@tursodatabase/serverless": "latest"
+    "@tursodatabase/serverless": "1.1.3"
   }
 }
