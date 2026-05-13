@@ -894,8 +894,32 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     };
   }
 
+  const existingRowsByVideoId = new Map();
+
+  // בדיקה מרוכזת מראש: אם הסרטון כבר קיים ב-videos לא עושים לו UPSERT שוב.
+  // זה חוסך constraint failed + existence check לכל סרטון, ובעיקר חוסך subrequests/CPU.
+  for (let i = 0; i < ids.length; i += 50) {
+    const part = ids.slice(i, i + 50);
+    const placeholders = part.map(() => "?").join(",");
+
+    try {
+      const existingRows = await env.DB.prepare(`
+        SELECT id, video_id
+        FROM videos
+        WHERE video_id IN (${placeholders})
+      `).bind(...part).all();
+
+      for (const r of (existingRows?.results || [])) {
+        if (r?.video_id) existingRowsByVideoId.set(String(r.video_id), r);
+      }
+    } catch (e) {
+      console.log(`existing videos bulk check failed error=${String(e)}`);
+    }
+  }
+
   const metaMap = await fetchVideoMeta(env, ids);
   const writeFts = boolFromEnv(env.CRON_WRITE_FTS, false);
+  const updateChannelLanguage = boolFromEnv(env.CRON_UPDATE_CHANNEL_LANGUAGE, false);
   const languageUpdateKeys = new Set();
   const languageUpdates = [];
 
@@ -936,117 +960,73 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     const videoKind = normalizeVideoKindForDb(meta?.video_kind);
     let videoRowReady = false;
 
-    try {
-      await env.DB.prepare(`
-        INSERT INTO videos(
-          video_id, channel_int, title, published_at,
-          video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, netfree_status, netfree_discovered_at, updated_at
-        )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ON CONFLICT(video_id) DO UPDATE SET
-          channel_int = excluded.channel_int,
-          title = CASE
-            WHEN excluded.title <> '' THEN excluded.title
-            ELSE videos.title
-          END,
-          published_at = CASE
-            WHEN excluded.published_at > 0 THEN excluded.published_at
-            ELSE videos.published_at
-          END,
-          video_kind = CASE
-            WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind
-            ELSE videos.video_kind
-          END,
-          duration_sec = CASE
-            WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec
-            ELSE videos.duration_sec
-          END,
-          view_count = CASE
-            WHEN excluded.view_count IS NOT NULL THEN excluded.view_count
-            ELSE videos.view_count
-          END,
-          like_count = CASE
-            WHEN excluded.like_count IS NOT NULL THEN excluded.like_count
-            ELSE videos.like_count
-          END,
-          comment_count = CASE
-            WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count
-            ELSE videos.comment_count
-          END,
-          stats_fetched_at = CASE
-            WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at
-            ELSE videos.stats_fetched_at
-          END,
-          language_code = CASE
-            WHEN excluded.language_code IS NOT NULL AND excluded.language_code <> '' THEN excluded.language_code
-            ELSE videos.language_code
-          END,
-          language_source = CASE
-            WHEN excluded.language_source IS NOT NULL AND excluded.language_source <> '' THEN excluded.language_source
-            ELSE videos.language_source
-          END,
-          updated_at = excluded.updated_at
-        WHERE
-          videos.channel_int IS NOT excluded.channel_int
-          OR videos.title IS NOT excluded.title
-          OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
-          OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind,'') != excluded.video_kind)
-          OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec,-1) != excluded.duration_sec)
-          OR (excluded.view_count IS NOT NULL AND COALESCE(videos.view_count,-1) != excluded.view_count)
-          OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count,-1) != excluded.like_count)
-          OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count,-1) != excluded.comment_count)
-          OR (excluded.stats_fetched_at IS NOT NULL AND COALESCE(videos.stats_fetched_at,0) != excluded.stats_fetched_at)
-          OR (excluded.language_code IS NOT NULL AND COALESCE(videos.language_code,'') != excluded.language_code)
-          OR (excluded.language_source IS NOT NULL AND COALESCE(videos.language_source,'') != excluded.language_source)
-      `).bind(
-        vid,
-        row.channel_int,
-        title,
-        publishedAt,
-        videoKind,
-        meta?.duration_sec ?? null,
-        meta?.view_count ?? null,
-        meta?.like_count ?? null,
-        meta?.comment_count ?? null,
-        meta ? ts : null,
-        safeLanguageCode,
-        safeLanguageSource,
-        row.netfree_default_status,
-        ts,
-        ts
-      ).run();
+    const existingVideoRow = existingRowsByVideoId.get(vid) || null;
 
-      rememberLanguageUpdate(row.channel_int, safeLanguageCode, safeLanguageSource);
-      videoRows++;
+    if (existingVideoRow?.id) {
+      // הסרטון כבר קיים. לא מעדכנים את videos שוב כדי לא ליפול על constraint/trigger.
+      // אם הוא הגיע לכאן זה בגלל שחסר/צריך תיקון metadata, לכן ממשיכים ל-video_details.
       videoRowReady = true;
-    } catch (e) {
-      skipped++;
-      console.log(
-        `video row upsert failed channel_int=${row.channel_int} vid=${vid} ` +
-        `title=${JSON.stringify(title).slice(0, 220)} error=${String(e)}`
-      );
-
-      // אם השורה כבר קיימת ב-videos, לא עוצרים את המטא בגלל כשל UPDATE/trigger.
-      // זה חשוב במיוחד ב-backfill ישן: יש סרטונים קיימים שחסרים להם רק video_details.
+    } else {
       try {
-        const existing = await env.DB.prepare(`
-          SELECT id
-          FROM videos
-          WHERE video_id = ?
-          LIMIT 1
-        `).bind(vid).first();
+        await env.DB.prepare(`
+          INSERT INTO videos(
+            video_id, channel_int, title, published_at,
+            video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
+            language_code, language_source, netfree_status, netfree_discovered_at, updated_at
+          )
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(video_id) DO NOTHING
+        `).bind(
+          vid,
+          row.channel_int,
+          title,
+          publishedAt,
+          videoKind,
+          meta?.duration_sec ?? null,
+          meta?.view_count ?? null,
+          meta?.like_count ?? null,
+          meta?.comment_count ?? null,
+          meta ? ts : null,
+          safeLanguageCode,
+          safeLanguageSource,
+          row.netfree_default_status,
+          ts,
+          ts
+        ).run();
 
-        if (existing?.id) {
-          videoRowReady = true;
-          console.log(`video row exists after upsert failure; continuing metadata vid=${vid} rowid=${existing.id}`);
+        if (safeLanguageCode) {
+          rememberLanguageUpdate(row.channel_int, safeLanguageCode, safeLanguageSource);
         }
-      } catch (checkErr) {
-        console.log(`video row existence check failed vid=${vid} error=${String(checkErr)}`);
-      }
 
-      if (!videoRowReady) {
-        continue;
+        videoRows++;
+        videoRowReady = true;
+      } catch (e) {
+        skipped++;
+        console.log(
+          `video row insert failed channel_int=${row.channel_int} vid=${vid} ` +
+          `title=${JSON.stringify(title).slice(0, 220)} error=${String(e)}`
+        );
+
+        // fallback אחרון בלבד: אם הבדיקה המרוכזת פספסה והסרטון כן קיים, עדיין נשמור metadata.
+        try {
+          const existing = await env.DB.prepare(`
+            SELECT id
+            FROM videos
+            WHERE video_id = ?
+            LIMIT 1
+          `).bind(vid).first();
+
+          if (existing?.id) {
+            videoRowReady = true;
+            console.log(`video row exists after insert failure; continuing metadata vid=${vid} rowid=${existing.id}`);
+          }
+        } catch (checkErr) {
+          console.log(`video row existence check failed vid=${vid} error=${String(checkErr)}`);
+        }
+
+        if (!videoRowReady) {
+          continue;
+        }
       }
     }
 
@@ -1085,21 +1065,23 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     }
   }
 
-  for(const item of languageUpdates){
-    try {
-      const langStmts = channelVideoLanguageStmts(
-        env,
-        item.channel_int,
-        item.language_code,
-        item.language_source
-      );
+  if (updateChannelLanguage) {
+    for(const item of languageUpdates){
+      try {
+        const langStmts = channelVideoLanguageStmts(
+          env,
+          item.channel_int,
+          item.language_code,
+          item.language_source
+        );
 
-      if(langStmts.length) await env.DB.batch(langStmts);
-    } catch (e) {
-      console.log(
-        `channel language update failed channel_int=${item.channel_int} ` +
-        `lang=${item.language_code} error=${String(e)}`
-      );
+        if(langStmts.length) await env.DB.batch(langStmts);
+      } catch (e) {
+        console.log(
+          `channel language update failed channel_int=${item.channel_int} ` +
+          `lang=${item.language_code} error=${String(e)}`
+        );
+      }
     }
   }
 
@@ -1116,7 +1098,7 @@ async function backfillSome(env, maxCalls=1){
   if(!env.YT_API_KEY) return 0;
   let totalImported = 0;
 
-  const pageSize = intFromEnv(env.CRON_BACKFILL_PAGE_SIZE, 5, 1, 50);
+  const pageSize = intFromEnv(env.CRON_BACKFILL_PAGE_SIZE, 5, 1, 8);
 
   const rows = await env.DB.prepare(`
     SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token, c.language_code, c.netfree_default_status
@@ -1189,7 +1171,7 @@ async function backfillSome(env, maxCalls=1){
               skipped: videos.length
             };
 
-        totalImported += Number(writeResult.videoRows || 0);
+        totalImported += Math.max(Number(writeResult.videoRows || 0), Number(writeResult.metaRows || 0));
 
         console.log(
           `backfillSome page_items=${videos.length} ` +
