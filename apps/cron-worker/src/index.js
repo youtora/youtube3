@@ -351,6 +351,14 @@ function intFromEnv(value, fallback, min, max){
   return Math.max(min, Math.min(max, n));
 }
 
+function boolFromEnv(value, fallback=false){
+  if(value === undefined || value === null || value === "") return fallback;
+  const s = String(value).trim().toLowerCase();
+  if(["1", "true", "yes", "on"].includes(s)) return true;
+  if(["0", "false", "no", "off"].includes(s)) return false;
+  return fallback;
+}
+
 function extractDurationSec(it){
   const sec = parseIsoDurationSec(it?.contentDetails?.duration || "");
   return Number.isFinite(sec) && sec > 0 ? sec : null;
@@ -843,8 +851,8 @@ function videoUpsertAndMetaStmts(env, rows, ts){
   });
 }
 async function upsertVideosAndMetaDirect(env, rows, ts){
-  // גרסה בטוחה במיוחד לקרון: מכניסים את שורת videos אחת-אחת.
-  // כך פריט בעייתי אחד מיוטיוב לא מפיל את כל הדף, והלוג יראה בדיוק מה נשבר.
+  // גרסה חסכונית ל-cron: כל סרטון מקבל UPSERT אחד לטבלת videos,
+  // video_details נשמר מיד, תגיות נשמרות מיד, ו-FTS כבוי כברירת מחדל כדי לא לשרוף subrequests.
   const cleanRows = [];
   const seen = new Set();
 
@@ -881,15 +889,35 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     return {
       videoRows: 0,
       metaRows: 0,
+      tagRows: 0,
       skipped: (rows || []).length
     };
   }
 
   const metaMap = await fetchVideoMeta(env, ids);
+  const writeFts = boolFromEnv(env.CRON_WRITE_FTS, false);
+  const languageUpdateKeys = new Set();
+  const languageUpdates = [];
+
   let videoRows = 0;
   let metaRows = 0;
   let tagRows = 0;
   let skipped = 0;
+
+  function rememberLanguageUpdate(channelInt, languageCode, source){
+    const lang = normalizeLangCode(languageCode);
+    if(!channelInt || !isSupportedLang(lang)) return;
+
+    const key = `${channelInt}|${lang}|${source || "video"}`;
+    if(languageUpdateKeys.has(key)) return;
+
+    languageUpdateKeys.add(key);
+    languageUpdates.push({
+      channel_int: channelInt,
+      language_code: lang,
+      language_source: source || "video"
+    });
+  }
 
   for (const row of cleanRows) {
     const vid = String(row.vid || "").trim();
@@ -907,12 +935,67 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
 
     try {
       await env.DB.prepare(`
-        INSERT OR IGNORE INTO videos(
+        INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
           language_code, language_source, netfree_status, netfree_discovered_at, updated_at
         )
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(video_id) DO UPDATE SET
+          channel_int = excluded.channel_int,
+          title = CASE
+            WHEN excluded.title <> '' THEN excluded.title
+            ELSE videos.title
+          END,
+          published_at = CASE
+            WHEN excluded.published_at > 0 THEN excluded.published_at
+            ELSE videos.published_at
+          END,
+          video_kind = CASE
+            WHEN excluded.video_kind IS NOT NULL THEN excluded.video_kind
+            ELSE videos.video_kind
+          END,
+          duration_sec = CASE
+            WHEN excluded.duration_sec IS NOT NULL THEN excluded.duration_sec
+            ELSE videos.duration_sec
+          END,
+          view_count = CASE
+            WHEN excluded.view_count IS NOT NULL THEN excluded.view_count
+            ELSE videos.view_count
+          END,
+          like_count = CASE
+            WHEN excluded.like_count IS NOT NULL THEN excluded.like_count
+            ELSE videos.like_count
+          END,
+          comment_count = CASE
+            WHEN excluded.comment_count IS NOT NULL THEN excluded.comment_count
+            ELSE videos.comment_count
+          END,
+          stats_fetched_at = CASE
+            WHEN excluded.stats_fetched_at IS NOT NULL THEN excluded.stats_fetched_at
+            ELSE videos.stats_fetched_at
+          END,
+          language_code = CASE
+            WHEN excluded.language_code IS NOT NULL AND excluded.language_code <> '' THEN excluded.language_code
+            ELSE videos.language_code
+          END,
+          language_source = CASE
+            WHEN excluded.language_source IS NOT NULL AND excluded.language_source <> '' THEN excluded.language_source
+            ELSE videos.language_source
+          END,
+          updated_at = excluded.updated_at
+        WHERE
+          videos.channel_int IS NOT excluded.channel_int
+          OR videos.title IS NOT excluded.title
+          OR (excluded.published_at IS NOT NULL AND COALESCE(videos.published_at,0) != COALESCE(excluded.published_at,0))
+          OR (excluded.video_kind IS NOT NULL AND COALESCE(videos.video_kind,'') != excluded.video_kind)
+          OR (excluded.duration_sec IS NOT NULL AND COALESCE(videos.duration_sec,-1) != excluded.duration_sec)
+          OR (excluded.view_count IS NOT NULL AND COALESCE(videos.view_count,-1) != excluded.view_count)
+          OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count,-1) != excluded.like_count)
+          OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count,-1) != excluded.comment_count)
+          OR (excluded.stats_fetched_at IS NOT NULL AND COALESCE(videos.stats_fetched_at,0) != excluded.stats_fetched_at)
+          OR (excluded.language_code IS NOT NULL AND COALESCE(videos.language_code,'') != excluded.language_code)
+          OR (excluded.language_source IS NOT NULL AND COALESCE(videos.language_source,'') != excluded.language_source)
       `).bind(
         vid,
         row.channel_int,
@@ -931,61 +1014,7 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
         ts
       ).run();
 
-      await env.DB.prepare(`
-        UPDATE videos
-        SET
-          title = CASE
-            WHEN ? <> '' THEN ?
-            ELSE title
-          END,
-          video_kind = CASE
-            WHEN ? IS NOT NULL THEN ?
-            ELSE video_kind
-          END,
-          duration_sec = CASE
-            WHEN ? IS NOT NULL THEN ?
-            ELSE duration_sec
-          END,
-          view_count = CASE
-            WHEN ? IS NOT NULL THEN ?
-            ELSE view_count
-          END,
-          like_count = CASE
-            WHEN ? IS NOT NULL THEN ?
-            ELSE like_count
-          END,
-          comment_count = CASE
-            WHEN ? IS NOT NULL THEN ?
-            ELSE comment_count
-          END,
-          stats_fetched_at = CASE
-            WHEN ? IS NOT NULL THEN ?
-            ELSE stats_fetched_at
-          END,
-          updated_at = ?
-        WHERE video_id = ?
-      `).bind(
-        title,
-        title,
-        videoKind,
-        videoKind,
-        meta?.duration_sec ?? null,
-        meta?.duration_sec ?? null,
-        meta?.view_count ?? null,
-        meta?.view_count ?? null,
-        meta?.like_count ?? null,
-        meta?.like_count ?? null,
-        meta?.comment_count ?? null,
-        meta?.comment_count ?? null,
-        meta ? ts : null,
-        meta ? ts : null,
-        ts,
-        vid
-      ).run();
-
-      const langStmts = channelVideoLanguageStmts(env, row.channel_int, lang.language_code, lang.language_source);
-      if (langStmts.length) await env.DB.batch(langStmts);
-
+      rememberLanguageUpdate(row.channel_int, lang.language_code, lang.language_source);
       videoRows++;
     } catch (e) {
       skipped++;
@@ -1002,8 +1031,6 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
       const tagStmts = detailStmts.slice(1, -2);
 
       try {
-        // חשוב: קודם שומרים את video_details לבד.
-        // אחר כך בונים את video_tags בנפרד, כדי שנפילת FTS לא תמנע תגיות/האשטגים.
         await detailStmts[0].run();
         metaRows++;
       } catch (e) {
@@ -1024,12 +1051,30 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
       }
 
       try {
-        if (ftsStmts.length) await env.DB.batch(ftsStmts);
+        if (writeFts && ftsStmts.length) await env.DB.batch(ftsStmts);
       } catch (e) {
         console.log(
           `video_details_fts update failed channel_int=${row.channel_int} vid=${vid} error=${String(e)}`
         );
       }
+    }
+  }
+
+  for(const item of languageUpdates){
+    try {
+      const langStmts = channelVideoLanguageStmts(
+        env,
+        item.channel_int,
+        item.language_code,
+        item.language_source
+      );
+
+      if(langStmts.length) await env.DB.batch(langStmts);
+    } catch (e) {
+      console.log(
+        `channel language update failed channel_int=${item.channel_int} ` +
+        `lang=${item.language_code} error=${String(e)}`
+      );
     }
   }
 
@@ -1191,6 +1236,7 @@ async function refreshMissingDetailsSome(env, limit=3){
   let statsRows = 0;
   let tagRows = 0;
   let missingFromYoutube = 0;
+  const writeFts = boolFromEnv(env.CRON_WRITE_FTS, false);
 
   for(const vid of ids){
     const meta = metaMap.get(vid) || null;
@@ -1266,7 +1312,7 @@ async function refreshMissingDetailsSome(env, limit=3){
     }
 
     try {
-      if(ftsStmts.length) await env.DB.batch(ftsStmts);
+      if(writeFts && ftsStmts.length) await env.DB.batch(ftsStmts);
     } catch (e) {
       console.log(`refreshMissingDetailsSome video_details_fts update failed vid=${vid} error=${String(e)}`);
     }
@@ -1534,18 +1580,25 @@ export default {
 
     ctx.waitUntil((async ()=>{
       const started = nowSec();
-      await setState(env, "cron_last_run", String(started));
+      const writeCronState = boolFromEnv(env.CRON_WRITE_STATE, false);
+
+      if(writeCronState){
+        await setState(env, "cron_last_run", String(started));
+      }
 
       let lastErr = "";
+      const feedsPerRun = intFromEnv(env.CRON_FEEDS_PER_RUN, 0, 0, 5);
 
-      try { await catchUpFeeds(env, 1); }
-      catch (e) {
-        if (!lastErr) lastErr = `catchUpFeeds: ${e?.stack || e}`;
-        console.log(`catchUpFeeds error`, e);
+      if(feedsPerRun > 0){
+        try { await catchUpFeeds(env, feedsPerRun); }
+        catch (e) {
+          if (!lastErr) lastErr = `catchUpFeeds: ${e?.stack || e}`;
+          console.log(`catchUpFeeds error`, e);
+        }
       }
 
       let backfillImported = 0;
-      try { backfillImported = await backfillSome(env, intFromEnv(env.CRON_BACKFILL_CHANNELS, 1, 1, 1)); }
+      try { backfillImported = await backfillSome(env, intFromEnv(env.CRON_BACKFILL_CHANNELS, 1, 0, 1)); }
       catch (e) {
         if (!lastErr) lastErr = `backfillSome: ${e?.stack || e}`;
         console.log(`backfillSome error`, e);
@@ -1563,8 +1616,10 @@ export default {
         }
       }
 
-      await setState(env, "cron_last_error", lastErr);
-      if (!lastErr) await setState(env, "cron_last_ok", String(nowSec()));
+      if(writeCronState){
+        await setState(env, "cron_last_error", lastErr);
+        if (!lastErr) await setState(env, "cron_last_ok", String(nowSec()));
+      }
     })());
   }
 };
