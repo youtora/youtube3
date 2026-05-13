@@ -397,6 +397,55 @@ function headerSearch(){
 }
 
 
+function renderNetfreeProbeBanner(){
+  return `
+    <div id="netfreeProbeBanner" style="margin:0 0 14px;padding:10px 14px;border:1px solid #e5e5e5;border-radius:10px;background:#fafafa;color:#333;font-size:14px;line-height:1.5">
+      בדיקת סינון: בודק אם הגלישה היא דרך נטפרי…
+    </div>
+  `;
+}
+
+async function canReachNetfreeProbeUrl(url, timeoutMs = 1800){
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    await fetch(url + "?t=" + Date.now(), {
+      method: "GET",
+      mode: "no-cors",
+      cache: "no-store",
+      credentials: "omit",
+      signal: controller.signal
+    });
+
+    return true;
+  } catch (e) {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function updateNetfreeProbeBanner(){
+  const el = document.getElementById("netfreeProbeBanner");
+  if(!el) return;
+
+  const results = await Promise.all([
+    canReachNetfreeProbeUrl("https://api.internal.netfree.link/user/0"),
+    canReachNetfreeProbeUrl("https://certx2.internal.netfree.link/user/0")
+  ]);
+
+  const isNetfree = results.some(Boolean);
+
+  el.textContent = isNetfree
+    ? "בדיקת סינון: נראה שאתה גולש דרך נטפרי"
+    : "בדיקת סינון: לא זוהתה גלישה דרך נטפרי";
+
+  el.style.background = isNetfree ? "#f1fff5" : "#fff8f0";
+  el.style.borderColor = isNetfree ? "#bfe8ca" : "#f0d2aa";
+}
+
+
 function renderShortCard(v){
   const thumb = ytShortThumb(v.video_id);
   const relDate = fmtDateRel(v.published_at);
@@ -550,6 +599,7 @@ async function pageLatest(kind="", qs=new URLSearchParams(location.search)){
   applyRouteMeta(latestSeo(kind));
 
   setPage(`
+    ${kind === "" ? renderNetfreeProbeBanner() : ""}
     <div class="h1">${esc(meta.title)}</div>
     <p class="sub">${esc(meta.sub)} · ${esc(languageName(lang))}</p>
     ${renderLanguageFilter(lang, path, sort === "latest" ? {} : { sort })}
@@ -566,6 +616,8 @@ async function pageLatest(kind="", qs=new URLSearchParams(location.search)){
 
     <div id="latestHint" class="muted" style="margin-top:8px"></div>
   `);
+
+  if(kind === "") updateNetfreeProbeBanner();
 
   const btn = document.getElementById("latestMoreBtn");
   const hint = document.getElementById("latestHint");
