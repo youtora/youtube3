@@ -931,7 +931,10 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     const title = (meta?.title || row.title || "[untitled]").slice(0, 200);
     const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
     const lang = inferVideoLanguage(meta || {}, row.channel_language_code || "");
+    const safeLanguageCode = isSupportedLang(lang.language_code) ? normalizeLangCode(lang.language_code) : "";
+    const safeLanguageSource = safeLanguageCode ? (lang.language_source || "") : "";
     const videoKind = normalizeVideoKindForDb(meta?.video_kind);
+    let videoRowReady = false;
 
     try {
       await env.DB.prepare(`
@@ -1007,22 +1010,44 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
         meta?.like_count ?? null,
         meta?.comment_count ?? null,
         meta ? ts : null,
-        lang.language_code,
-        lang.language_source,
+        safeLanguageCode,
+        safeLanguageSource,
         row.netfree_default_status,
         ts,
         ts
       ).run();
 
-      rememberLanguageUpdate(row.channel_int, lang.language_code, lang.language_source);
+      rememberLanguageUpdate(row.channel_int, safeLanguageCode, safeLanguageSource);
       videoRows++;
+      videoRowReady = true;
     } catch (e) {
       skipped++;
       console.log(
         `video row upsert failed channel_int=${row.channel_int} vid=${vid} ` +
         `title=${JSON.stringify(title).slice(0, 220)} error=${String(e)}`
       );
-      continue;
+
+      // אם השורה כבר קיימת ב-videos, לא עוצרים את המטא בגלל כשל UPDATE/trigger.
+      // זה חשוב במיוחד ב-backfill ישן: יש סרטונים קיימים שחסרים להם רק video_details.
+      try {
+        const existing = await env.DB.prepare(`
+          SELECT id
+          FROM videos
+          WHERE video_id = ?
+          LIMIT 1
+        `).bind(vid).first();
+
+        if (existing?.id) {
+          videoRowReady = true;
+          console.log(`video row exists after upsert failure; continuing metadata vid=${vid} rowid=${existing.id}`);
+        }
+      } catch (checkErr) {
+        console.log(`video row existence check failed vid=${vid} error=${String(checkErr)}`);
+      }
+
+      if (!videoRowReady) {
+        continue;
+      }
     }
 
     if (meta) {
