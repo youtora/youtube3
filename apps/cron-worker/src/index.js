@@ -1046,14 +1046,14 @@ async function backfillSome(env, maxCalls=1){
   if(!env.YT_API_KEY) return 0;
   let totalImported = 0;
 
-  const pageSize = intFromEnv(env.CRON_BACKFILL_PAGE_SIZE, 2, 1, 2);
+  const pageSize = intFromEnv(env.CRON_BACKFILL_PAGE_SIZE, 5, 1, 5);
 
   const rows = await env.DB.prepare(`
     SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token, c.language_code, c.netfree_default_status
     FROM channel_backfill cb
     JOIN channels c ON c.id = cb.channel_int
     WHERE cb.done=0 AND c.is_active=1
-    ORDER BY COALESCE(cb.updated_at, 0) ASC, cb.channel_int ASC
+    ORDER BY cb.updated_at ASC, cb.channel_int ASC
     LIMIT ?
   `).bind(maxCalls).all();
 
@@ -1121,15 +1121,6 @@ async function backfillSome(env, maxCalls=1){
 
         totalImported += Number(writeResult.videoRows || 0);
 
-        const check = await env.DB.prepare(`
-          SELECT
-            COUNT(*) AS videos_in_db,
-            MIN(published_at) AS oldest_published,
-            MAX(updated_at) AS last_video_updated
-          FROM videos
-          WHERE channel_int=?
-        `).bind(r.channel_int).first();
-
         console.log(
           `backfillSome page_items=${videos.length} ` +
           `to_write=${videosToWrite.length} ` +
@@ -1137,9 +1128,6 @@ async function backfillSome(env, maxCalls=1){
           `meta_rows=${writeResult.metaRows} ` +
           `tag_rows=${writeResult.tagRows ?? 0} ` +
           `skipped=${writeResult.skipped} ` +
-          `db_videos=${check?.videos_in_db ?? null} ` +
-          `oldest=${check?.oldest_published ?? null} ` +
-          `last_video_updated=${check?.last_video_updated ?? null} ` +
           `channel_int=${r.channel_int}`
         );
       }
@@ -1179,12 +1167,15 @@ async function backfillSome(env, maxCalls=1){
 async function refreshMissingDetailsSome(env, limit=3){
   if(!env.YT_API_KEY) return;
 
+  limit = Number(limit || 0);
+  if(limit <= 0) return;
+
   const rows = await env.DB.prepare(`
     SELECT v.video_id
     FROM videos v
     LEFT JOIN video_details d ON d.video_id = v.video_id
     WHERE d.video_id IS NULL
-    ORDER BY COALESCE(v.stats_fetched_at, 0) ASC, v.published_at DESC, v.id DESC
+    ORDER BY v.id DESC
     LIMIT ?
   `).bind(limit).all();
 
@@ -1565,7 +1556,7 @@ export default {
       if(backfillImported > 0){
         console.log(`refreshMissingDetailsSome skipped because backfillImported=${backfillImported}`);
       } else {
-        try { await refreshMissingDetailsSome(env, intFromEnv(env.CRON_REPAIR_META_PER_RUN, 1, 0, 1)); }
+        try { await refreshMissingDetailsSome(env, intFromEnv(env.CRON_REPAIR_META_PER_RUN, 0, 0, 10)); }
         catch (e) {
           if (!lastErr) lastErr = `refreshMissingDetailsSome: ${e?.stack || e}`;
           console.log(`refreshMissingDetailsSome error`, e);
