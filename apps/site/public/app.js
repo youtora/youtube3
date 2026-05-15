@@ -123,7 +123,6 @@ const CHANNEL_SORTS = [
   { value: "latest", label: "חדשים" },
   { value: "oldest", label: "ישנים" },
   { value: "views", label: "הכי נצפים" },
-  { value: "likes", label: "הכי הרבה לייקים" },
 ];
 function normalizeChannelSort(value){
   const sort = String(value || "latest").trim().toLowerCase();
@@ -656,7 +655,7 @@ async function latestLoadMore(token){
     `/api/latest?limit=24` +
     `&lang=${encodeURIComponent(latestState.lang)}` +
     `&sort=${encodeURIComponent(latestState.sort)}` +
-    (latestState.kind ? `&kind=${encodeURIComponent(latestState.kind)}` : "") +
+    `&kind=${encodeURIComponent(latestState.kind || "V")}` +
     (latestState.cursor ? `&cursor=${encodeURIComponent(latestState.cursor)}` : "");
 
   const data = await api(url);
@@ -1470,7 +1469,7 @@ async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.sear
   const activeTab = ["videos", "playlists", "shorts", "live"].includes(tab) ? tab : "videos";
   const lang = currentLang(qs);
   const sort = normalizeChannelSort(qs.get("sort"));
-  const kind = activeTab === "shorts" ? "S" : activeTab === "live" ? "L" : "";
+  const kind = activeTab === "shorts" ? "S" : activeTab === "live" ? "L" : "V";
 
   setPage(`<div class="muted">טוען ערוץ…</div>`);
 
@@ -1484,7 +1483,7 @@ async function pageChannel(channel_id, tab, qs=new URLSearchParams(location.sear
     `&videos_limit=24` +
     `&lang=${encodeURIComponent(lang)}` +
     `&sort=${encodeURIComponent(sort)}` +
-    (kind ? `&kind=${encodeURIComponent(kind)}` : "")
+    `&kind=${encodeURIComponent(kind)}`
   );
 
   const ch = data.channel;
@@ -1618,7 +1617,7 @@ async function channelLoadMoreVideos(token, channel_id, channel_title, channel_t
     `&videos_limit=24` +
     `&lang=${encodeURIComponent(lang)}` +
     `&sort=${encodeURIComponent(sort)}` +
-    (kind ? `&kind=${encodeURIComponent(kind)}` : "") +
+    `&kind=${encodeURIComponent(kind || "V")}` +
     (channelVideosState.cursor ? `&videos_cursor=${encodeURIComponent(channelVideosState.cursor)}` : "");
 
   const data = await api(url);

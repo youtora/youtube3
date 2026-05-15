@@ -67,11 +67,15 @@ function mapVideoRow(r) {
   };
 }
 
+function normalizeVideoKind(value) {
+  const kind = String(value || "V").trim().toUpperCase();
+  return (kind === "S" || kind === "L") ? kind : "V";
+}
+
 function sortParts(sort) {
   if (sort === "views") {
     return {
-      index: "idx_videos_public_lang_views",
-      kindIndex: "idx_videos_public_kind_lang_views",
+      index: "idx_videos_public_kind_lang_views",
       minViewsSql: "AND v.view_count >= 2000",
       cursorSql: "AND (v.view_count, v.published_at, v.id) < (?, ?, ?)",
       orderSql: "v.view_count DESC, v.published_at DESC, v.id DESC"
@@ -79,19 +83,20 @@ function sortParts(sort) {
   }
 
   return {
-    index: "idx_videos_public_lang_latest_cover",
-    kindIndex: "idx_videos_public_kind_lang_latest_cover",
+    index: "idx_videos_public_kind_lang_latest_cover",
     minViewsSql: "",
     cursorSql: "AND (v.published_at, v.id) < (?, ?)",
     orderSql: "v.published_at DESC, v.id DESC"
   };
 }
 
+function dbVideoKind(kind) {
+  return kind === "V" ? "" : kind;
+}
+
 function selectSql({ kind, sort, cursor }) {
   const parts = sortParts(sort);
   const cursorSql = cursor ? parts.cursorSql : "";
-  const kindSql = kind ? "AND v.video_kind = ?" : "";
-  const indexName = kind ? parts.kindIndex : parts.index;
 
   return `
     SELECT
@@ -109,12 +114,12 @@ function selectSql({ kind, sort, cursor }) {
       c.channel_id,
       c.title AS channel_title,
       c.thumbnail_url AS channel_thumbnail_url
-    FROM videos AS v INDEXED BY ${indexName}
+    FROM videos AS v INDEXED BY ${parts.index}
     JOIN channels AS c
       ON c.id = v.channel_int
     WHERE v.netfree_status = 1
+      AND v.video_kind = ?
       AND v.language_code = ?
-      ${kindSql}
       ${parts.minViewsSql}
       ${cursorSql}
     ORDER BY ${parts.orderSql}
@@ -130,8 +135,7 @@ export async function onRequest({ env, request }) {
   const lang = normalizePublicLang(url.searchParams.get("lang") || "he", "he");
   const sort = normalizeSort(url.searchParams.get("sort") || "latest");
 
-  const kindRaw = (url.searchParams.get("kind") || "").trim().toUpperCase();
-  const kind = (kindRaw === "S" || kindRaw === "L") ? kindRaw : null;
+  const kind = normalizeVideoKind(url.searchParams.get("kind"));
 
   const { views: cursorViews, p: cursorP, id: cursorId } = parseCursor(
     url.searchParams.get("cursor") || "",
@@ -139,8 +143,7 @@ export async function onRequest({ env, request }) {
   );
   const hasCursor = cursorP !== null && cursorId !== null && (sort !== "views" || cursorViews !== null);
 
-  const binds = [lang];
-  if (kind) binds.push(kind);
+  const binds = [dbVideoKind(kind), lang];
   if (hasCursor) {
     if (sort === "views") binds.push(cursorViews, cursorP, cursorId);
     else binds.push(cursorP, cursorId);
