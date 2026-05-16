@@ -328,7 +328,7 @@ function classifyVideoItem(it){
   if(it?.liveStreamingDetails) return "L";
 
   const sec = parseIsoDurationSec(it?.contentDetails?.duration || "");
-  if(!(Number.isFinite(sec) && sec > 0 && sec <= 180)) return "";
+  if(!(Number.isFinite(sec) && sec > 0 && sec <= 180)) return "V";
 
   const w = Number(it?.player?.embedWidth || 0);
   const h = Number(it?.player?.embedHeight || 0);
@@ -337,12 +337,12 @@ function classifyVideoItem(it){
     return "S";
   }
 
-  return "";
+  return "V";
 }
 
 function normalizeVideoKindForDb(value){
-  const kind = String(value || "").trim().toUpperCase();
-  return kind === "S" || kind === "L" ? kind : null;
+  const kind = String(value || "V").trim().toUpperCase();
+  return kind === "S" || kind === "L" ? kind : "V";
 }
 
 function intFromEnv(value, fallback, min, max){

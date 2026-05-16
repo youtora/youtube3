@@ -135,7 +135,7 @@ function normalizeVideoKind(value) {
 }
 
 function dbVideoKind(kind) {
-  return kind === "V" ? "" : kind;
+  return kind;
 }
 
 function videosSql({ kind, sort, hasCursor }) {

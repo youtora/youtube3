@@ -91,7 +91,7 @@ function sortParts(sort) {
 }
 
 function dbVideoKind(kind) {
-  return kind === "V" ? "" : kind;
+  return kind;
 }
 
 function selectSql({ kind, sort, cursor }) {
