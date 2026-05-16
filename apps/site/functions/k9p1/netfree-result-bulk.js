@@ -123,6 +123,20 @@ async function updateChunk(DB, items, { recheckDays, t }) {
     ...whereStatusBinds
   ).run();
 
+  await DB.prepare(`
+    UPDATE videos
+    SET etrog_visible = CASE
+      WHEN netfree_status = 4 THEN 0
+      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 1 THEN 1
+      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 2 THEN 1
+      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 3 AND netfree_status <> 2 THEN 1
+      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 4 AND netfree_status = 1 THEN 1
+      ELSE 0
+    END
+    WHERE id IN (${idPlaceholders})
+      AND video_id = CASE id ${videoCase} ELSE video_id END
+  `).bind(...ids, ...videoBinds).run();
+
   return Number(result?.meta?.changes || result?.changes || 0);
 }
 

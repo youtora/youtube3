@@ -1,5 +1,6 @@
 import { getDB } from "../_db.js";
 import { normalizePublicLang } from "../_shared/language.js";
+import { publicProviderFromRequest, publicVideoWhereSql } from "../_shared/filter-policy.js";
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
@@ -29,7 +30,8 @@ function parseCursor(raw) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-function buildTagSql(hasCursor) {
+function buildTagSql(hasCursor, provider) {
+  const publicWhereSql = publicVideoWhereSql(provider, "v");
   return `
     SELECT
       v.id,
@@ -51,7 +53,7 @@ function buildTagSql(hasCursor) {
       ON c.id = v.channel_int
     WHERE t.tag_type = ?
       AND t.tag_norm = ?
-      AND v.netfree_status = 1
+      AND ${publicWhereSql}
       AND v.language_code = ?
       ${hasCursor ? "AND t.video_rowid < ?" : ""}
     ORDER BY t.video_rowid DESC, t.id DESC
@@ -69,6 +71,7 @@ export async function onRequest({ env, request }) {
   const limit = intParam(url, "limit", 50, 1, 100);
   const lang = normalizePublicLang(url.searchParams.get("lang") || "he", "he");
   const cursor = parseCursor(url.searchParams.get("cursor") || "");
+  const provider = publicProviderFromRequest(request, url);
 
   if (!valueNorm) {
     return Response.json(
@@ -77,7 +80,7 @@ export async function onRequest({ env, request }) {
     );
   }
 
-  const sql = buildTagSql(cursor !== null);
+  const sql = buildTagSql(cursor !== null, provider);
 
   const res = cursor !== null
     ? await env.DB.prepare(sql).bind(type, valueNorm, lang, cursor, limit).all()
@@ -106,7 +109,7 @@ export async function onRequest({ env, request }) {
       : null;
 
   return Response.json(
-    { results, next_cursor, value, type, lang },
+    { results, next_cursor, value, type, lang, provider },
     { headers: { "cache-control": "public, max-age=30" } }
   );
 }

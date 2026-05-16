@@ -225,8 +225,52 @@ function videoKindLabel(kind){
   return "";
 }
 
+const FILTER_PROVIDER_KEY = "youtora_filter_provider_v1";
+
+function normalizeFilterProvider(value){
+  return String(value || "netfree").trim().toLowerCase() === "etrog" ? "etrog" : "netfree";
+}
+
+function getSavedFilterProvider(){
+  try{
+    const raw = localStorage.getItem(FILTER_PROVIDER_KEY);
+    if(!raw) return "netfree";
+    try{
+      const data = JSON.parse(raw);
+      return normalizeFilterProvider(data?.provider || raw);
+    }catch{
+      return normalizeFilterProvider(raw);
+    }
+  }catch{
+    return "netfree";
+  }
+}
+
+function saveFilterProvider(provider){
+  const value = normalizeFilterProvider(provider);
+  try{
+    localStorage.setItem(FILTER_PROVIDER_KEY, JSON.stringify({ provider: value, checkedAt: Date.now() }));
+  }catch{}
+  try{
+    document.cookie = `filter_provider=${encodeURIComponent(value)}; Max-Age=43200; Path=/; SameSite=Lax; Secure`;
+  }catch{}
+  return value;
+}
+
+function withFilterProvider(url){
+  try{
+    const u = new URL(url, location.origin);
+    if(u.pathname.startsWith("/api/") && !u.searchParams.has("provider")){
+      u.searchParams.set("provider", getSavedFilterProvider());
+    }
+    return u.pathname + u.search + u.hash;
+  }catch{
+    return url;
+  }
+}
+
 async function api(url){
-  const r = await fetch(url);
+  const r = await fetch(withFilterProvider(url));
   const t = await r.text();
   if(!r.ok) throw new Error(`${r.status} ${t.slice(0,200)}`);
   return JSON.parse(t);
@@ -435,10 +479,11 @@ async function updateNetfreeProbeBanner(){
   ]);
 
   const isNetfree = results.some(Boolean);
+  const provider = saveFilterProvider(isNetfree ? "netfree" : "etrog");
 
   el.textContent = isNetfree
     ? "בדיקת סינון: נראה שאתה גולש דרך נטפרי"
-    : "בדיקת סינון: לא זוהתה גלישה דרך נטפרי";
+    : "בדיקת סינון: לא זוהתה גלישה דרך נטפרי — תוצג תצוגת אתרוג";
 
   el.style.background = isNetfree ? "#f1fff5" : "#fff8f0";
   el.style.borderColor = isNetfree ? "#bfe8ca" : "#f0d2aa";

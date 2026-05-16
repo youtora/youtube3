@@ -345,6 +345,22 @@ function normalizeVideoKindForDb(value){
   return kind === "S" || kind === "L" ? kind : "V";
 }
 
+function normalizeFilterPolicyForDb(value, fallback = 3){
+  const n = Number(value);
+  return [1, 2, 3, 4].includes(n) ? n : fallback;
+}
+
+function etrogVisibleFromPolicyStatus(policy, status){
+  const p = normalizeFilterPolicyForDb(policy, 3);
+  const s = Number(status);
+  if(s === 4) return 0;
+  if(p === 1) return 1;
+  if(p === 2) return 1;
+  if(p === 3) return s === 2 ? 0 : 1;
+  if(p === 4) return s === 1 ? 1 : 0;
+  return 0;
+}
+
 function intFromEnv(value, fallback, min, max){
   const n = parseInt(String(value ?? ""), 10);
   if(!Number.isFinite(n)) return fallback;
@@ -756,7 +772,8 @@ function videoUpsertAndMetaStmts(env, rows, ts){
       title: String(raw?.title || "").slice(0, 200) || "[untitled]",
       published_at: Number(raw?.published_at || 0) || 0,
       channel_language_code: raw?.channel_language_code || raw?.language_code || "",
-      netfree_default_status: Number(raw?.netfree_default_status) === 0 ? 0 : 1
+      netfree_default_status: Number(raw?.netfree_default_status) === 0 ? 0 : 1,
+      filter_policy: normalizeFilterPolicyForDb(raw?.filter_policy, Number(raw?.netfree_default_status) === 1 ? 1 : 3)
     });
   }
 
@@ -781,6 +798,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
       const publishedAt = toUnixSeconds(meta?.published_at_iso || "") || row.published_at || 0;
       const lang = inferVideoLanguage(meta || {}, row.channel_language_code || "");
       const videoKind = normalizeVideoKindForDb(meta?.video_kind);
+      const etrogVisible = etrogVisibleFromPolicyStatus(row.filter_policy, row.netfree_default_status);
 
       // vid כבר נוקה למעלה, לכן משתמשים ב-VALUES רגיל.
       // ב-Turso/libSQL זה בטוח יותר מ-INSERT ... SELECT ... WHERE ... ON CONFLICT.
@@ -789,9 +807,9 @@ function videoUpsertAndMetaStmts(env, rows, ts){
           video_id, channel_int, title, published_at,
           video_kind, duration_sec,
           view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, netfree_status, netfree_discovered_at, updated_at
+          language_code, language_source, netfree_status, etrog_visible, netfree_discovered_at, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int      = excluded.channel_int,
           title            = excluded.title,
@@ -833,6 +851,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
         lang.language_code,
         lang.language_source,
         row.netfree_default_status,
+        etrogVisible,
         ts,
         ts
       ));
@@ -880,7 +899,8 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
       title: String(raw?.title || "").slice(0, 200) || "[untitled]",
       published_at: Number(raw?.published_at || 0) || 0,
       channel_language_code: raw?.channel_language_code || raw?.language_code || "",
-      netfree_default_status: Number(raw?.netfree_default_status) === 0 ? 0 : 1
+      netfree_default_status: Number(raw?.netfree_default_status) === 0 ? 0 : 1,
+      filter_policy: normalizeFilterPolicyForDb(raw?.filter_policy, Number(raw?.netfree_default_status) === 1 ? 1 : 3)
     });
   }
 
@@ -958,6 +978,7 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
     const safeLanguageCode = isSupportedLang(lang.language_code) ? normalizeLangCode(lang.language_code) : "";
     const safeLanguageSource = safeLanguageCode ? (lang.language_source || "") : "";
     const videoKind = normalizeVideoKindForDb(meta?.video_kind);
+    const etrogVisible = etrogVisibleFromPolicyStatus(row.filter_policy, row.netfree_default_status);
     let videoRowReady = false;
 
     const existingVideoRow = existingRowsByVideoId.get(vid) || null;
@@ -972,9 +993,9 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
           INSERT INTO videos(
             video_id, channel_int, title, published_at,
             video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-            language_code, language_source, netfree_status, netfree_discovered_at, updated_at
+            language_code, language_source, netfree_status, etrog_visible, netfree_discovered_at, updated_at
           )
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
           ON CONFLICT(video_id) DO NOTHING
         `).bind(
           vid,
@@ -990,6 +1011,7 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
           safeLanguageCode,
           safeLanguageSource,
           row.netfree_default_status,
+          etrogVisible,
           ts,
           ts
         ).run();
@@ -1101,7 +1123,7 @@ async function backfillSome(env, maxCalls=1){
   const pageSize = intFromEnv(env.CRON_BACKFILL_PAGE_SIZE, 5, 1, 8);
 
   const rows = await env.DB.prepare(`
-    SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token, c.language_code, c.netfree_default_status
+    SELECT cb.channel_int, cb.uploads_playlist_id, cb.next_page_token, c.language_code, c.netfree_default_status, c.filter_policy
     FROM channel_backfill cb
     JOIN channels c ON c.id = cb.channel_int
     WHERE cb.done=0 AND c.is_active=1
@@ -1155,7 +1177,8 @@ async function backfillSome(env, maxCalls=1){
           title: String(sn?.title || "").slice(0,200) || "[untitled]",
           published_at: toUnixSeconds(sn?.publishedAt || null) || 0,
           channel_language_code: r.language_code || "",
-          netfree_default_status: r.netfree_default_status ?? 1
+          netfree_default_status: r.netfree_default_status ?? 1,
+          filter_policy: r.filter_policy ?? (Number(r.netfree_default_status) === 1 ? 1 : 3)
         });
       }
 
@@ -1343,7 +1366,7 @@ async function catchUpFeeds(env, maxChannels=5){
 
   async function loadRows(fromId){
     return env.DB.prepare(`
-      SELECT id, channel_id, language_code, netfree_default_status
+      SELECT id, channel_id, language_code, netfree_default_status, filter_policy
       FROM channels
       WHERE is_active=1 AND id>?
       ORDER BY id ASC
@@ -1385,7 +1408,8 @@ async function catchUpFeeds(env, maxChannels=5){
             title: String(e.title || "").slice(0, 200) || "[untitled]",
             published_at: e.published_at || 0,
             channel_language_code: ch.language_code || "",
-            netfree_default_status: ch.netfree_default_status ?? 1
+            netfree_default_status: ch.netfree_default_status ?? 1,
+            filter_policy: ch.filter_policy ?? (Number(ch.netfree_default_status) === 1 ? 1 : 3)
           });
         }
 

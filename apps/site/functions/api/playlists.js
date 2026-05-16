@@ -1,4 +1,5 @@
 import { getDB } from "../_db.js";
+import { publicProviderFromRequest, publicVideoWhereSql } from "../_shared/filter-policy.js";
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
@@ -17,6 +18,8 @@ export async function onRequest({ env, request }) {
   env.DB = getDB(env);
   const url = new URL(request.url);
   const limit = intParam(url, "limit", 60, 1, 200);
+  const provider = publicProviderFromRequest(request, url);
+  const publicVideoWhere = publicVideoWhereSql(provider, "v");
 
   // cursor format: "<row_id>" (playlists.id)
   const cursorId = parseCursor(url.searchParams.get("cursor") || "");
@@ -42,7 +45,7 @@ export async function onRequest({ env, request }) {
               SELECT 1
               FROM videos v
               WHERE v.channel_int = c.id
-                AND v.netfree_status = 1
+                AND ${publicVideoWhere}
               LIMIT 1
             )
           )
@@ -68,7 +71,7 @@ export async function onRequest({ env, request }) {
             SELECT 1
             FROM videos v
             WHERE v.channel_int = c.id
-              AND v.netfree_status = 1
+              AND ${publicVideoWhere}
             LIMIT 1
           )
         )
@@ -95,7 +98,7 @@ export async function onRequest({ env, request }) {
       : null;
 
   return Response.json(
-    { playlists, next_cursor },
+    { playlists, next_cursor, provider },
     { headers: { "cache-control": "public, max-age=60" } }
   );
 }

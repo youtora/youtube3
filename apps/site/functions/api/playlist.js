@@ -1,7 +1,10 @@
 import { getDB } from "../_db.js";
+import { publicProviderFromRequest, publicVideoWhereSql } from "../_shared/filter-policy.js";
 export async function onRequest({ env, request }) {
   env.DB = getDB(env);
   const url = new URL(request.url);
+  const provider = publicProviderFromRequest(request, url);
+  const publicVideoWhere = publicVideoWhereSql(provider, "v");
 
   if (request.method !== "GET") {
     return new Response("method not allowed", { status: 405 });
@@ -32,7 +35,7 @@ export async function onRequest({ env, request }) {
           SELECT 1
           FROM videos v
           WHERE v.channel_int = c.id
-            AND v.netfree_status = 1
+            AND ${publicVideoWhere}
           LIMIT 1
         )
       )
@@ -44,7 +47,7 @@ export async function onRequest({ env, request }) {
   }
 
   return Response.json(
-    { playlist },
+    { playlist, provider },
     { headers: { "cache-control": "public, max-age=300" } }
   );
 }

@@ -1,5 +1,6 @@
 import { getDB } from "../_db.js";
 import { normalizePublicLang } from "../_shared/language.js";
+import { publicProviderFromRequest, publicVideoIndexName, publicVideoWhereSql } from "../_shared/filter-policy.js";
 
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
@@ -72,10 +73,10 @@ function normalizeVideoKind(value) {
   return (kind === "S" || kind === "L") ? kind : "V";
 }
 
-function sortParts(sort) {
+function sortParts(sort, provider) {
   if (sort === "views") {
     return {
-      index: "idx_videos_public_kind_lang_views",
+      index: publicVideoIndexName(provider, "idx_videos_public_kind_lang_views", "idx_videos_etrog_kind_lang_views"),
       minViewsSql: "AND v.view_count >= 2000",
       cursorSql: "AND (v.view_count, v.published_at, v.id) < (?, ?, ?)",
       orderSql: "v.view_count DESC, v.published_at DESC, v.id DESC"
@@ -83,7 +84,7 @@ function sortParts(sort) {
   }
 
   return {
-    index: "idx_videos_public_kind_lang_latest_cover",
+    index: publicVideoIndexName(provider, "idx_videos_public_kind_lang_latest_cover", "idx_videos_etrog_kind_lang_latest_cover"),
     minViewsSql: "",
     cursorSql: "AND (v.published_at, v.id) < (?, ?)",
     orderSql: "v.published_at DESC, v.id DESC"
@@ -94,8 +95,9 @@ function dbVideoKind(kind) {
   return kind;
 }
 
-function selectSql({ kind, sort, cursor }) {
-  const parts = sortParts(sort);
+function selectSql({ kind, sort, cursor, provider }) {
+  const parts = sortParts(sort, provider);
+  const publicWhereSql = publicVideoWhereSql(provider, "v");
   const cursorSql = cursor ? parts.cursorSql : "";
 
   return `
@@ -117,7 +119,7 @@ function selectSql({ kind, sort, cursor }) {
     FROM videos AS v INDEXED BY ${parts.index}
     JOIN channels AS c
       ON c.id = v.channel_int
-    WHERE v.netfree_status = 1
+    WHERE ${publicWhereSql}
       AND v.video_kind = ?
       AND v.language_code = ?
       ${parts.minViewsSql}
@@ -136,6 +138,7 @@ export async function onRequest({ env, request }) {
   const sort = normalizeSort(url.searchParams.get("sort") || "latest");
 
   const kind = normalizeVideoKind(url.searchParams.get("kind"));
+  const provider = publicProviderFromRequest(request, url);
 
   const { views: cursorViews, p: cursorP, id: cursorId } = parseCursor(
     url.searchParams.get("cursor") || "",
@@ -150,7 +153,7 @@ export async function onRequest({ env, request }) {
   }
   binds.push(limit);
 
-  const rows = await env.DB.prepare(selectSql({ kind, sort, cursor: hasCursor }))
+  const rows = await env.DB.prepare(selectSql({ kind, sort, cursor: hasCursor, provider }))
     .bind(...binds)
     .all();
 
@@ -166,7 +169,7 @@ export async function onRequest({ env, request }) {
       : null;
 
   return Response.json(
-    { videos, next_cursor, lang, sort },
+    { videos, next_cursor, lang, sort, provider },
     { headers: { "cache-control": "public, max-age=60" } }
   );
 }

@@ -1,4 +1,5 @@
 import { getDB } from "../_db.js";
+import { publicProviderFromRequest, publicVideoIndexName, publicVideoWhereSql } from "../_shared/filter-policy.js";
 
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
@@ -73,9 +74,11 @@ function mapVideo(r, current) {
   };
 }
 
-async function loadDiscoverVideos(env, current, limit) {
+async function loadDiscoverVideos(env, current, limit, provider = "netfree") {
   const lang = String(current.language_code || "he").trim() || "he";
   const kind = normalizeVideoKind(current.video_kind);
+  const discoverIndex = publicVideoIndexName(provider, "idx_videos_public_kind_lang_latest_cover", "idx_videos_etrog_kind_lang_latest_cover");
+  const publicWhereSql = publicVideoWhereSql(provider, "v");
   const bands = makeDiscoverBands(current.video_id);
   const perBand = 2;
 
@@ -96,10 +99,10 @@ async function loadDiscoverVideos(env, current, limit) {
         c.channel_id,
         c.title AS channel_title,
         c.thumbnail_url AS channel_thumbnail_url
-      FROM videos AS v INDEXED BY idx_videos_public_kind_lang_latest_cover
+      FROM videos AS v INDEXED BY ${discoverIndex}
       LEFT JOIN channels c
         ON c.id = v.channel_int
-      WHERE v.netfree_status = 1
+      WHERE ${publicWhereSql}
         AND v.video_kind = ?
         AND v.language_code = ?
         AND v.published_at <= ?
@@ -132,6 +135,7 @@ async function loadDiscoverVideos(env, current, limit) {
 export async function onRequest({ env, request }) {
   env.DB = getDB(env);
   const url = new URL(request.url);
+  const provider = publicProviderFromRequest(request, url);
 
   const video_id = (url.searchParams.get("video_id") || "").trim();
   if (!video_id) return Response.json({ error: "missing video_id" }, { status: 400 });
@@ -153,7 +157,7 @@ export async function onRequest({ env, request }) {
     LEFT JOIN channels c
       ON c.id = v.channel_int
     WHERE v.video_id = ?
-      AND v.netfree_status = 1
+      AND ${publicVideoWhereSql(provider, "v")}
     LIMIT 1
   `).bind(video_id).first();
 
@@ -163,9 +167,9 @@ export async function onRequest({ env, request }) {
   const kind = normalizeVideoKind(current.video_kind);
 
   if (tab === "discover") {
-    const videos = await loadDiscoverVideos(env, current, limit);
+    const videos = await loadDiscoverVideos(env, current, limit, provider);
     return Response.json(
-      { tab, videos },
+      { tab, videos, provider },
       { headers: { "cache-control": "public, max-age=120" } }
     );
   }
@@ -195,7 +199,7 @@ export async function onRequest({ env, request }) {
     }));
 
     return Response.json(
-      { tab, playlists },
+      { tab, playlists, provider },
       { headers: { "cache-control": "public, max-age=120" } }
     );
   }
@@ -205,8 +209,10 @@ export async function onRequest({ env, request }) {
     : "published_at DESC, id DESC";
 
   const indexName = tab === "popular"
-    ? "idx_videos_public_channel_kind_lang_views_cover"
-    : "idx_videos_public_channel_kind_lang_latest_cover";
+    ? publicVideoIndexName(provider, "idx_videos_public_channel_kind_lang_views_cover", "idx_videos_etrog_channel_kind_lang_views_cover")
+    : publicVideoIndexName(provider, "idx_videos_public_channel_kind_lang_latest_cover", "idx_videos_etrog_channel_kind_lang_latest_cover");
+
+  const publicWhereSql = publicVideoWhereSql(provider, "videos");
 
   const rows = await env.DB.prepare(`
     SELECT
@@ -221,7 +227,7 @@ export async function onRequest({ env, request }) {
       comment_count
     FROM videos INDEXED BY ${indexName}
     WHERE channel_int = ?
-      AND netfree_status = 1
+      AND ${publicWhereSql}
       AND video_kind = ?
       AND video_id <> ?
       AND language_code = ?

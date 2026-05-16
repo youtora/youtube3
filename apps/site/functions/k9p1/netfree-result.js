@@ -126,13 +126,21 @@ export async function onRequest({ env, request }) {
       SET
         netfree_status = ?,
         netfree_recheck_after = ?,
+        etrog_visible = CASE
+          WHEN ? = 4 THEN 0
+          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 1 THEN 1
+          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 2 THEN 1
+          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 3 AND ? <> 2 THEN 1
+          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 4 AND ? = 1 THEN 1
+          ELSE 0
+        END,
         netfree_discovered_at = CASE
           WHEN ? = 0 THEN ?
           ELSE COALESCE(netfree_discovered_at, updated_at, published_at, ?)
         END
       WHERE video_id = ?
         AND netfree_status <> ?
-    `).bind(status, recheckAfter, status, t, t, videoId, status));
+    `).bind(status, recheckAfter, status, status, status, status, t, t, videoId, status));
 
     const result = await DB.batch(stmts);
     const revealed_channels = await revealOpenChannels(DB, videoIds, status);

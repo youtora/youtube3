@@ -1,5 +1,6 @@
 import { getDB } from "../_db.js";
 import { normalizePublicLang } from "../_shared/language.js";
+import { publicProviderFromRequest, publicVideoWhereSql } from "../_shared/filter-policy.js";
 
 function parseJson(value, fallback) {
   try { return JSON.parse(value || JSON.stringify(fallback)); }
@@ -37,7 +38,20 @@ function isOptionalLanguageStoreError(error) {
   );
 }
 
-function publicChannelWhereSql() {
+function publicChannelWhereSql(provider) {
+  if (provider === "etrog") {
+    return `
+      c.is_active = 1
+      AND EXISTS (
+        SELECT 1
+        FROM videos v
+        WHERE v.channel_int = c.id
+          AND ${publicVideoWhereSql(provider, "v")}
+        LIMIT 1
+      )
+    `;
+  }
+
   return `
     c.is_active = 1
     AND (
@@ -46,14 +60,14 @@ function publicChannelWhereSql() {
         SELECT 1
         FROM videos v
         WHERE v.channel_int = c.id
-          AND v.netfree_status = 1
+          AND ${publicVideoWhereSql(provider, "v")}
         LIMIT 1
       )
     )
   `;
 }
 
-async function loadChannelsWithLanguageIndex(DB, lang, langLike) {
+async function loadChannelsWithLanguageIndex(DB, lang, langLike, provider) {
   return DB.prepare(`
     SELECT
       c.id, c.channel_id, c.title, c.thumbnail_url, c.banner_url,
@@ -64,7 +78,7 @@ async function loadChannelsWithLanguageIndex(DB, lang, langLike) {
     FROM channels AS c
     LEFT JOIN channel_languages AS all_cl
       ON all_cl.channel_int = c.id
-    WHERE ${publicChannelWhereSql()}
+    WHERE ${publicChannelWhereSql(provider)}
       AND (
         EXISTS (
           SELECT 1
@@ -79,7 +93,7 @@ async function loadChannelsWithLanguageIndex(DB, lang, langLike) {
           SELECT 1
           FROM videos v_lang
           WHERE v_lang.channel_int = c.id
-            AND v_lang.netfree_status = 1
+            AND ${publicVideoWhereSql(provider, "v_lang")}
             AND v_lang.language_code = ?
           LIMIT 1
         )
@@ -99,7 +113,7 @@ async function loadChannelsWithLanguageIndex(DB, lang, langLike) {
   `).bind(lang, lang, langLike, lang, lang).all();
 }
 
-async function loadChannelsWithoutLanguageIndex(DB, lang, langLike) {
+async function loadChannelsWithoutLanguageIndex(DB, lang, langLike, provider) {
   return DB.prepare(`
     SELECT
       c.id, c.channel_id, c.title, c.thumbnail_url, c.banner_url,
@@ -108,7 +122,7 @@ async function loadChannelsWithoutLanguageIndex(DB, lang, langLike) {
       c.topic_categories_json, c.channel_meta_fetched_at,
       '' AS indexed_languages
     FROM channels AS c
-    WHERE ${publicChannelWhereSql()}
+    WHERE ${publicChannelWhereSql(provider)}
       AND (
         c.language_code = ?
         OR c.languages_json LIKE ?
@@ -116,7 +130,7 @@ async function loadChannelsWithoutLanguageIndex(DB, lang, langLike) {
           SELECT 1
           FROM videos v_lang
           WHERE v_lang.channel_int = c.id
-            AND v_lang.netfree_status = 1
+            AND ${publicVideoWhereSql(provider, "v_lang")}
             AND v_lang.language_code = ?
           LIMIT 1
         )
@@ -155,19 +169,20 @@ export async function onRequest({ env, request }) {
   env.DB = DB;
   const url = new URL(request.url);
   const lang = normalizePublicLang(url.searchParams.get("lang") || "he", "he");
+  const provider = publicProviderFromRequest(request, url);
   const langLike = `%"${lang}"%`;
 
   let rows;
   let fallback = "";
 
   try {
-    rows = await loadChannelsWithLanguageIndex(DB, lang, langLike);
+    rows = await loadChannelsWithLanguageIndex(DB, lang, langLike, provider);
   } catch (error) {
     if (!isOptionalLanguageStoreError(error)) throw error;
     fallback = "without_channel_languages";
 
     try {
-      rows = await loadChannelsWithoutLanguageIndex(DB, lang, langLike);
+      rows = await loadChannelsWithoutLanguageIndex(DB, lang, langLike, provider);
     } catch (_) {
       fallback = "base_channels_only";
       rows = await loadChannelsBaseFallback(DB);
@@ -177,7 +192,7 @@ export async function onRequest({ env, request }) {
   const channels = (rows.results || []).map(channelRow);
 
   return Response.json(
-    { channels, lang, fallback: fallback || undefined },
+    { channels, lang, provider, fallback: fallback || undefined },
     { headers: { "cache-control": "public, max-age=30" } }
   );
 }

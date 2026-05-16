@@ -1,5 +1,6 @@
 import { getDB } from "../_db.js";
 import { normalizePublicLang } from "../_shared/language.js";
+import { publicProviderFromRequest, publicVideoWhereSql } from "../_shared/filter-policy.js";
 // functions/api/search.js
 // Default: fast title-only FTS over video_fts.
 // Optional mode: ?scope=all searches title + description/tags/hashtags.
@@ -41,6 +42,8 @@ export async function onRequest({ env, request }) {
   const scope = (url.searchParams.get("scope") || "title").trim().toLowerCase() === "all" ? "all" : "title";
   const lang = normalizePublicLang(url.searchParams.get("lang") || "he", "he");
   const kind = normalizeSearchKind(url.searchParams.get("kind"));
+  const provider = publicProviderFromRequest(request, url);
+  const publicWhereSql = publicVideoWhereSql(provider, "v");
 
   const kindSql = kind === "all" ? "" : "AND v.video_kind = ?";
   const kindBind = kind === "all" ? [] : [kind];
@@ -52,7 +55,7 @@ export async function onRequest({ env, request }) {
 
   if (!match) {
     return Response.json(
-      { results: [], next_cursor: null, scope, lang, kind },
+      { results: [], next_cursor: null, scope, lang, kind, provider },
       { headers: { "cache-control": "public, max-age=30" } }
     );
   }
@@ -93,7 +96,7 @@ export async function onRequest({ env, request }) {
             ON v.id = h.video_rowid
           JOIN channels AS c
             ON c.id = v.channel_int
-          WHERE v.netfree_status = 1
+          WHERE ${publicWhereSql}
             AND v.language_code = ?
             ${kindSql}
             AND v.id < ?
@@ -132,7 +135,7 @@ export async function onRequest({ env, request }) {
             ON v.id = h.video_rowid
           JOIN channels AS c
             ON c.id = v.channel_int
-          WHERE v.netfree_status = 1
+          WHERE ${publicWhereSql}
             AND v.language_code = ?
             ${kindSql}
           ORDER BY v.id DESC
@@ -160,7 +163,7 @@ export async function onRequest({ env, request }) {
           JOIN channels AS c
             ON c.id = v.channel_int
           WHERE video_fts MATCH ?
-            AND v.netfree_status = 1
+            AND ${publicWhereSql}
             AND v.language_code = ?
             ${kindSql}
             AND f.rowid < ?
@@ -187,7 +190,7 @@ export async function onRequest({ env, request }) {
           JOIN channels AS c
             ON c.id = v.channel_int
           WHERE video_fts MATCH ?
-            AND v.netfree_status = 1
+            AND ${publicWhereSql}
             AND v.language_code = ?
             ${kindSql}
           ORDER BY f.rowid DESC
@@ -218,7 +221,7 @@ export async function onRequest({ env, request }) {
       : null;
 
   return Response.json(
-    { results, next_cursor, scope, lang, kind },
+    { results, next_cursor, scope, lang, kind, provider },
     { headers: { "cache-control": "public, max-age=30" } }
   );
 }

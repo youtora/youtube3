@@ -1,4 +1,5 @@
 import { getDB } from "../_db.js";
+import { publicProviderFromRequest, publicVideoIndexName, publicVideoWhereSql } from "../_shared/filter-policy.js";
 import { parseJsonArray } from "../_shared/video-meta.js";
 
 function clamp(n, a, b) {
@@ -69,9 +70,11 @@ function normalizeVideoKind(value) {
   return ["V", "S", "L"].includes(kind) ? kind : "V";
 }
 
-async function loadDiscoverVideos(env, current, limit) {
+async function loadDiscoverVideos(env, current, limit, provider = "netfree") {
   const lang = String(current.language_code || "he").trim() || "he";
   const kind = normalizeVideoKind(current.video_kind);
+  const discoverIndex = publicVideoIndexName(provider, "idx_videos_public_kind_lang_latest_cover", "idx_videos_etrog_kind_lang_latest_cover");
+  const publicWhereSql = publicVideoWhereSql(provider, "v");
   const bands = makeDiscoverBands(current.video_id);
   const perBand = 2;
 
@@ -92,10 +95,10 @@ async function loadDiscoverVideos(env, current, limit) {
         c.channel_id,
         c.title AS channel_title,
         c.thumbnail_url AS channel_thumbnail_url
-      FROM videos AS v INDEXED BY idx_videos_public_kind_lang_latest_cover
+      FROM videos AS v INDEXED BY ${discoverIndex}
       LEFT JOIN channels c
         ON c.id = v.channel_int
-      WHERE v.netfree_status = 1
+      WHERE ${publicWhereSql}
         AND v.video_kind = ?
         AND v.language_code = ?
         AND v.published_at <= ?
@@ -128,6 +131,7 @@ async function loadDiscoverVideos(env, current, limit) {
 export async function onRequest({ env, request }) {
   env.DB = getDB(env);
   const url = new URL(request.url);
+  const provider = publicProviderFromRequest(request, url);
   const video_id = (url.searchParams.get("video_id") || "").trim();
   if (!video_id) return new Response("missing video_id", { status: 400 });
 
@@ -159,7 +163,7 @@ export async function onRequest({ env, request }) {
     LEFT JOIN channels c
       ON c.id = v.channel_int
     WHERE v.video_id = ?
-      AND v.netfree_status = 1
+      AND ${publicVideoWhereSql(provider, "v")}
     LIMIT 1
   `).bind(video_id).first();
 
@@ -184,12 +188,13 @@ export async function onRequest({ env, request }) {
     thumbnail_url: vrow.thumbnail_url || null
   };
 
-  const recommended = await loadDiscoverVideos(env, vrow, recLimit);
+  const recommended = await loadDiscoverVideos(env, vrow, recLimit, provider);
 
   return Response.json(
     {
       video,
-      recommended
+      recommended,
+      provider
     },
     {
       headers: {

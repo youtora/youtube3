@@ -1,6 +1,7 @@
 import { getDB } from "../_db.js";
 import { fetchVideoMeta as fetchFullVideoMeta, videoDetailsStmts, inferVideoLanguage } from "../_shared/video-meta.js";
 import { buildChannelLanguage, channelLanguageStmts, channelVideoLanguageStmts } from "../_shared/language.js";
+import { etrogVisibleFromPolicyStatus, netfreeDefaultStatusForPolicy, normalizeFilterPolicy, showInPublicChannelsForPolicy } from "../_shared/filter-policy.js";
 
 function unauthorized() { return new Response("unauthorized", { status: 401 }); }
 function nowSec() { return Math.floor(Date.now() / 1000); }
@@ -388,7 +389,7 @@ async function syncChannelLanguagesSafely({ DB, channel_int, languages, source, 
   }
 }
 
-async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, channel_language_code = "", netfree_default_status = 1, max_pages = 2, language_index_ready = true }) {
+async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, channel_language_code = "", netfree_default_status = 1, filter_policy = 3, max_pages = 2, language_index_ready = true }) {
   if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0, next_page_token: null, done: 0 };
   if (!uploads_playlist_id) return { ok: false, reason: "missing uploads playlist", imported: 0, next_page_token: null, done: 1 };
 
@@ -424,14 +425,15 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
       const comment_count = meta.comment_count ?? null;
       const stats_fetched_at = metaMap.has(vid) ? now : null;
       const lang = inferVideoLanguage(meta, channel_language_code);
+      const etrog_visible = etrogVisibleFromPolicyStatus(filter_policy, netfree_default_status);
 
       stmts.push(DB.prepare(`
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, netfree_status, netfree_discovered_at, updated_at
+          language_code, language_source, netfree_status, etrog_visible, netfree_discovered_at, updated_at
         )
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int=excluded.channel_int,
           title=excluded.title,
@@ -448,7 +450,7 @@ async function importRecentVideosForChannel({ env, DB, channel_int, uploads_play
       `).bind(
         vid, channel_int, title, published_at,
         video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-        lang.language_code, lang.language_source, netfree_default_status, now, now
+        lang.language_code, lang.language_source, netfree_default_status, etrog_visible, now, now
       ));
 
       if (language_index_ready) {
@@ -559,8 +561,12 @@ export async function onRequest({ env, request }) {
   const requested_channel_id = String(body.channel_id || "").trim();
   const playlists_pages = Math.min(Math.max(parseInt(body.playlists_pages || "10", 10), 1), 30);
   const videos_pages = Math.min(Math.max(parseInt(body.videos_pages || "2", 10), 0), 10);
-  const netfree_default_status = Number(body.netfree_default_status) === 0 ? 0 : 1;
-  const show_in_public_channels = Number(body.show_in_public_channels) === 0 ? 0 : 1;
+  const filter_policy = normalizeFilterPolicy(
+    body.filter_policy ?? (Number(body.netfree_default_status) === 1 ? 1 : 3),
+    3
+  );
+  const netfree_default_status = netfreeDefaultStatusForPolicy(filter_policy);
+  const show_in_public_channels = showInPublicChannelsForPolicy(filter_policy);
 
   let resolved;
   try {
@@ -603,9 +609,9 @@ export async function onRequest({ env, request }) {
       topic_categories_json, topic_ids_json, localizations_json,
       channel_meta_fetched_at, channel_meta_error,
       language_code, language_source, languages_json,
-      netfree_default_status, show_in_public_channels
+      netfree_default_status, show_in_public_channels, filter_policy
     )
-    VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(channel_id) DO UPDATE SET
       title = COALESCE(excluded.title, channels.title),
       thumbnail_url = COALESCE(excluded.thumbnail_url, channels.thumbnail_url),
@@ -635,6 +641,7 @@ export async function onRequest({ env, request }) {
       , languages_json = excluded.languages_json
       , netfree_default_status = excluded.netfree_default_status
       , show_in_public_channels = excluded.show_in_public_channels
+      , filter_policy = excluded.filter_policy
   `).bind(
     channel_id,
     title,
@@ -664,10 +671,11 @@ export async function onRequest({ env, request }) {
     meta.language_source || "",
     meta.languages_json || "[]",
     netfree_default_status,
-    show_in_public_channels
+    show_in_public_channels,
+    filter_policy
   ).run();
 
-  const ch = await DB.prepare(`SELECT id, netfree_default_status FROM channels WHERE channel_id=?`).bind(channel_id).first();
+  const ch = await DB.prepare(`SELECT id, netfree_default_status, filter_policy FROM channels WHERE channel_id=?`).bind(channel_id).first();
   if (!ch) return new Response("failed to load channel row", { status: 500 });
   const channel_int = ch.id;
 
@@ -730,6 +738,7 @@ export async function onRequest({ env, request }) {
         uploads_playlist_id: uploads,
         channel_language_code: meta.language_code || "",
         netfree_default_status: ch.netfree_default_status ?? netfree_default_status,
+        filter_policy: ch.filter_policy ?? filter_policy,
         max_pages: videos_pages,
         language_index_ready,
       });
@@ -767,6 +776,7 @@ export async function onRequest({ env, request }) {
     uploads_playlist_id: uploads,
     netfree_default_status: ch.netfree_default_status ?? netfree_default_status,
     show_in_public_channels,
+    filter_policy: ch.filter_policy ?? filter_policy,
     channel_meta: {
       ok: channelMetaResult.ok,
       error: metaError || null,

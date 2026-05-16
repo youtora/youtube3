@@ -2,6 +2,7 @@ import { getDB } from "../_db.js";
 // functions/websub/youtube.js
 import { fetchVideoMeta, videoDetailsStmts, nowSec, inferVideoLanguage } from "../_shared/video-meta.js";
 import { channelVideoLanguageStmts } from "../_shared/language.js";
+import { etrogVisibleFromPolicyStatus } from "../_shared/filter-policy.js";
 
 function canonicalTopicUrl(topic) {
   const t = (topic || "").trim();
@@ -200,10 +201,11 @@ export async function onRequest({ env, request }) {
     let channelInt = null;
     let channelLanguageCode = "";
     let netfreeDefaultStatus = 1;
+    let filterPolicy = 1;
 
     if (topicHdr) {
       const sub = await env.DB.prepare(`
-        SELECT s.channel_int, c.language_code, c.netfree_default_status
+        SELECT s.channel_int, c.language_code, c.netfree_default_status, c.filter_policy
         FROM subscriptions s
         LEFT JOIN channels c ON c.id = s.channel_int
         WHERE topic_url=?
@@ -213,6 +215,7 @@ export async function onRequest({ env, request }) {
       channelInt = sub?.channel_int ?? null;
       channelLanguageCode = sub?.language_code || "";
       netfreeDefaultStatus = sub?.netfree_default_status ?? 1;
+      filterPolicy = sub?.filter_policy ?? (Number(netfreeDefaultStatus) === 1 ? 1 : 3);
     }
 
     if (!channelInt) {
@@ -220,7 +223,7 @@ export async function onRequest({ env, request }) {
 
       if (channelId) {
         const ch = await env.DB.prepare(`
-          SELECT id, language_code, netfree_default_status
+          SELECT id, language_code, netfree_default_status, filter_policy
           FROM channels
           WHERE channel_id=?
           LIMIT 1
@@ -229,6 +232,7 @@ export async function onRequest({ env, request }) {
         channelInt = ch?.id ?? null;
         channelLanguageCode = ch?.language_code || channelLanguageCode || "";
         netfreeDefaultStatus = ch?.netfree_default_status ?? netfreeDefaultStatus;
+        filterPolicy = ch?.filter_policy ?? filterPolicy;
       }
     }
 
@@ -256,14 +260,15 @@ export async function onRequest({ env, request }) {
       const commentCount = meta.comment_count ?? null;
       const statsFetchedAt = videoMeta.has(e.videoId) ? now : null;
       const lang = inferVideoLanguage(meta, channelLanguageCode);
+      const etrogVisible = etrogVisibleFromPolicyStatus(filterPolicy, netfreeDefaultStatus);
 
       stmts.push(env.DB.prepare(`
         INSERT INTO videos(
           video_id, channel_int, title, published_at,
           video_kind, duration_sec, view_count, like_count, comment_count, stats_fetched_at,
-          language_code, language_source, netfree_status, netfree_discovered_at, updated_at
+          language_code, language_source, netfree_status, etrog_visible, netfree_discovered_at, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(video_id) DO UPDATE SET
           channel_int      = excluded.channel_int,
           title            = excluded.title,
@@ -287,7 +292,7 @@ export async function onRequest({ env, request }) {
           OR (excluded.like_count IS NOT NULL AND COALESCE(videos.like_count, -1) != excluded.like_count)
           OR (excluded.comment_count IS NOT NULL AND COALESCE(videos.comment_count, -1) != excluded.comment_count)
           OR (excluded.language_code IS NOT NULL AND COALESCE(videos.language_code,'') != excluded.language_code)
-      `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, viewCount, likeCount, commentCount, statsFetchedAt, lang.language_code, lang.language_source, netfreeDefaultStatus, now, now));
+      `).bind(e.videoId, channelInt, title, e.published_at ?? 0, videoKind, durationSec, viewCount, likeCount, commentCount, statsFetchedAt, lang.language_code, lang.language_source, netfreeDefaultStatus, etrogVisible, now, now));
 
       stmts.push(...channelVideoLanguageStmts(env.DB, channelInt, lang.language_code, lang.language_source));
 

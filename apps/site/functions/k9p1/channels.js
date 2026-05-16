@@ -1,4 +1,5 @@
 import { getDB } from "../_db.js";
+import { netfreeDefaultStatusForPolicy, normalizeFilterPolicy, showInPublicChannelsForPolicy } from "../_shared/filter-policy.js";
 // functions/admin/channels.js
 
 function unauthorized() { return new Response("unauthorized", { status: 401 }); }
@@ -33,6 +34,7 @@ export async function onRequest({ env, request }) {
              c.languages_json,
              c.netfree_default_status,
              c.show_in_public_channels,
+             c.filter_policy,
              c.channel_meta_fetched_at,
              c.channel_meta_error,
              s.status AS websub_status,
@@ -52,12 +54,12 @@ export async function onRequest({ env, request }) {
     const channel_id = (body.channel_id || "").trim();
     if (!channel_id) return new Response("missing channel_id", { status: 400 });
 
-    if (!["purge", "set_netfree_status"].includes(action)) {
+    if (!["purge", "set_netfree_status", "set_filter_policy"].includes(action)) {
       return new Response("unsupported action", { status: 400 });
     }
 
     const ch = await env.DB.prepare(`
-      SELECT id
+      SELECT id, filter_policy, netfree_default_status
       FROM channels
       WHERE channel_id = ?
       LIMIT 1
@@ -66,51 +68,80 @@ export async function onRequest({ env, request }) {
     if (!ch?.id) return new Response("not found", { status: 404 });
     const channel_int = ch.id;
 
-    if (action === "set_netfree_status") {
-      const target_status = Number(body.netfree_default_status ?? body.status);
+    if (action === "set_netfree_status" || action === "set_filter_policy") {
+      const requestedPolicy = action === "set_filter_policy"
+        ? body.filter_policy
+        : (Number(body.netfree_default_status ?? body.status) === 1 ? 1 : 3);
 
-      if (![0, 1].includes(target_status)) {
-        return json({ ok: false, error: "invalid netfree_default_status. use 0 or 1" }, 400);
-      }
-
+      const filter_policy = normalizeFilterPolicy(requestedPolicy, 3);
+      const previousPolicy = normalizeFilterPolicy(ch.filter_policy ?? (Number(ch.netfree_default_status) === 1 ? 1 : 3), 3);
+      const previousWasOpenAll = previousPolicy === 1 || Number(ch.netfree_default_status) === 1;
+      const netfree_default_status = netfreeDefaultStatusForPolicy(filter_policy);
+      const show_in_public_channels = showInPublicChannelsForPolicy(filter_policy);
       const t = nowSec();
-      const show_in_public_channels = target_status === 1 ? 1 : 0;
 
       const chUpdate = await env.DB.prepare(`
         UPDATE channels
         SET
+          filter_policy = ?,
           netfree_default_status = ?,
           show_in_public_channels = ?,
           updated_at = ?
         WHERE id = ?
-      `).bind(target_status, show_in_public_channels, t, channel_int).run();
+      `).bind(filter_policy, netfree_default_status, show_in_public_channels, t, channel_int).run();
 
-      const videoUpdate = target_status === 1
-        ? await env.DB.prepare(`
+      let videoUpdate;
+
+      if (filter_policy === 1) {
+        videoUpdate = await env.DB.prepare(`
           UPDATE videos
           SET
-            netfree_status = 1,
+            netfree_status = CASE WHEN netfree_status = 4 THEN 4 ELSE 1 END,
+            etrog_visible = CASE WHEN netfree_status = 4 THEN 0 ELSE 1 END,
             netfree_recheck_after = NULL,
             updated_at = ?
           WHERE channel_int = ?
-            AND COALESCE(netfree_status, -1) <> 1
-        `).bind(t, channel_int).run()
-        : await env.DB.prepare(`
+        `).bind(t, channel_int).run();
+      } else if (previousWasOpenAll) {
+        videoUpdate = await env.DB.prepare(`
           UPDATE videos
           SET
-            netfree_status = 0,
+            netfree_status = CASE WHEN netfree_status = 4 THEN 4 ELSE 0 END,
+            etrog_visible = CASE
+              WHEN netfree_status = 4 THEN 0
+              WHEN ? = 2 THEN 1
+              WHEN ? = 3 THEN 1
+              WHEN ? = 4 THEN 0
+              ELSE 0
+            END,
             netfree_recheck_after = NULL,
             netfree_discovered_at = COALESCE(published_at, netfree_discovered_at, updated_at, ?),
             updated_at = ?
           WHERE channel_int = ?
-            AND COALESCE(netfree_status, -1) <> 0
-        `).bind(t, t, channel_int).run();
+        `).bind(filter_policy, filter_policy, filter_policy, t, t, channel_int).run();
+      } else {
+        videoUpdate = await env.DB.prepare(`
+          UPDATE videos
+          SET
+            etrog_visible = CASE
+              WHEN netfree_status = 4 THEN 0
+              WHEN ? = 2 THEN 1
+              WHEN ? = 3 AND netfree_status <> 2 THEN 1
+              WHEN ? = 4 AND netfree_status = 1 THEN 1
+              ELSE 0
+            END,
+            updated_at = ?
+          WHERE channel_int = ?
+        `).bind(filter_policy, filter_policy, filter_policy, t, channel_int).run();
+      }
 
       return json({
         ok: true,
-        action,
+        action: "set_filter_policy",
         channel_id,
-        netfree_default_status: target_status,
+        filter_policy,
+        previous_filter_policy: previousPolicy,
+        netfree_default_status,
         show_in_public_channels,
         changed: {
           channels: chUpdate?.meta?.changes || 0,

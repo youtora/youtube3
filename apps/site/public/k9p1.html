@@ -39,17 +39,18 @@ https://www.youtube.com/c/SomeChannel"
   ></textarea>
 
   <div style="margin:12px 0;padding:12px;border:1px solid #ddd;border-radius:12px;background:#fafafa">
-    <div style="font-weight:700;margin-bottom:8px">מצב נטפרי לערוצים שאתה מוסיף עכשיו</div>
+    <div style="font-weight:700;margin-bottom:8px">מצב סינון לערוצים שאתה מוסיף עכשיו</div>
 
-    <label style="display:block;margin:8px 0">
-      <input type="radio" name="netfree_mode" value="open" checked>
-      ערוצים פתוחים לגמרי — כל סרטון חדש יוצג מיד באתר
-    </label>
+    <select id="filter_policy" style="width:100%;box-sizing:border-box;padding:10px;font-size:16px">
+      <option value="1">1 — פתוח לגמרי בנטפרי ואתרוג</option>
+      <option value="2">2 — בדיקה בנטפרי, פתוח באתרוג</option>
+      <option value="3" selected>3 — בדיקה בנטפרי ואתרוג</option>
+      <option value="4">4 — רגיש בנטפרי ואתרוג</option>
+    </select>
 
-    <label style="display:block;margin:8px 0">
-      <input type="radio" name="netfree_mode" value="mixed">
-      ערוצים מעורבים — הסרטונים ייכנסו מוסתרים עד בדיקה
-    </label>
+    <div style="font-size:13px;color:#555;line-height:1.6;margin-top:8px">
+      1: כל הסרטונים פתוחים. 2: נטפרי בודק, אתרוג פתוח. 3: אתרוג פתוח חוץ מחסומי נטפרי. 4: אתרוג מציג רק מה שנפתח בנטפרי.
+    </div>
   </div>
 
   <button onclick="addChannels()">הוסף ערוצים</button>
@@ -126,6 +127,22 @@ https://www.youtube.com/c/SomeChannel"
     const num = Number(n || 0);
     try{ return num.toLocaleString("he-IL"); }
     catch{ return String(num); }
+  }
+
+
+  function normalizeFilterPolicyValue(value){
+    const n = Number(value);
+    return [1,2,3,4].includes(n) ? n : 3;
+  }
+
+  function filterPolicyLabel(value){
+    switch(normalizeFilterPolicyValue(value)){
+      case 1: return "פתוח לגמרי בנטפרי ואתרוג";
+      case 2: return "בדיקה בנטפרי, פתוח באתרוג";
+      case 3: return "בדיקה בנטפרי ואתרוג";
+      case 4: return "רגיש בנטפרי ואתרוג";
+      default: return "בדיקה בנטפרי ואתרוג";
+    }
   }
 
   function extractDirectChannelId(raw){
@@ -214,9 +231,7 @@ https://www.youtube.com/c/SomeChannel"
   async function addChannels(){
     const raw = document.getElementById('channel_input').value;
     const parsed = parseChannelInputs(raw);
-    const mode = document.querySelector('input[name="netfree_mode"]:checked')?.value || 'open';
-    const netfree_default_status = mode === 'mixed' ? 0 : 1;
-    const show_in_public_channels = mode === 'mixed' ? 0 : 1;
+    const filter_policy = normalizeFilterPolicyValue(document.getElementById('filter_policy')?.value);
 
     if(!parsed.items.length && !parsed.invalid.length){
       return out("לא הוזן כלום.");
@@ -231,7 +246,8 @@ https://www.youtube.com/c/SomeChannel"
 
     out({
       message: `נמצאו ${parsed.items.length} שורות תקינות. מתחיל הוספה...`,
-      netfree_mode: mode,
+      filter_policy,
+      filter_policy_label: filterPolicyLabel(filter_policy),
       items: parsed.items,
       invalid_lines: parsed.invalid
     });
@@ -241,8 +257,7 @@ https://www.youtube.com/c/SomeChannel"
     for(let i = 0; i < parsed.items.length; i++){
       const item = {
         ...parsed.items[i],
-        netfree_default_status,
-        show_in_public_channels
+        filter_policy
       };
       out(`מוסיף ${i + 1} מתוך ${parsed.items.length}: ${item.channel_id || item.raw_input}`);
       const result = await addSingleChannel(item);
@@ -265,7 +280,8 @@ https://www.youtube.com/c/SomeChannel"
         title: x.data?.title || null,
         resolved_via: x.data?.resolved_via || null,
         netfree_default_status: x.data?.netfree_default_status ?? null,
-        show_in_public_channels: x.data?.show_in_public_channels ?? null
+        show_in_public_channels: x.data?.show_in_public_channels ?? null,
+        filter_policy: x.data?.filter_policy ?? null
       })),
       failed_items: failed.map((x)=>({
         requested: x.request_item.channel_id || x.request_item.raw_input,
@@ -288,7 +304,7 @@ https://www.youtube.com/c/SomeChannel"
         <thead>
           <tr>
             <th style="text-align:right;padding:6px;border-bottom:1px solid #ddd">ערוץ</th>
-            <th style="text-align:right;padding:6px;border-bottom:1px solid #ddd">מצב נטפרי</th>
+            <th style="text-align:right;padding:6px;border-bottom:1px solid #ddd">מצב סינון</th>
             <th style="text-align:right;padding:6px;border-bottom:1px solid #ddd">WebSub</th>
             <th style="text-align:right;padding:6px;border-bottom:1px solid #ddd">עודכן</th>
             <th style="text-align:right;padding:6px;border-bottom:1px solid #ddd"></th>
@@ -307,8 +323,11 @@ https://www.youtube.com/c/SomeChannel"
                 </div>
               </td>
               <td style="padding:8px">
-                <div style="font-weight:600">${Number(c.netfree_default_status) === 0 ? "מעורב / לבדיקה" : "פתוח לגמרי"}</div>
-                <div style="font-size:12px;color:#666">${Number(c.show_in_public_channels) === 0 ? "מוסתר ברשימת הערוצים" : "מופיע ברשימת הערוצים"}</div>
+                <div style="font-weight:600">${esc(filterPolicyLabel(c.filter_policy))}</div>
+                <div style="font-size:12px;color:#666">נטפרי: ${Number(c.netfree_default_status) === 1 ? "פתוח" : "לבדיקה"} · רשימת ערוצים: ${Number(c.show_in_public_channels) === 0 ? "מוסתר עד פתיחה" : "מופיע"}</div>
+                <select onchange="setChannelFilterPolicy('${esc(c.channel_id)}', this.value)" style="margin-top:6px;max-width:260px">
+                  ${[1,2,3,4].map((p)=>`<option value="${p}" ${normalizeFilterPolicyValue(c.filter_policy) === p ? "selected" : ""}>${p} — ${esc(filterPolicyLabel(p))}</option>`).join("")}
+                </select>
               </td>
               <td style="padding:8px">
                 <div>${esc(c.websub_status || "")}</div>
@@ -316,12 +335,6 @@ https://www.youtube.com/c/SomeChannel"
               </td>
               <td style="padding:8px">${fmtTs(c.updated_at)}</td>
               <td style="padding:8px;text-align:left">
-                <button
-                  onclick="toggleChannelNetfree('${esc(c.channel_id)}', ${Number(c.netfree_default_status) === 0 ? 1 : 0})"
-                  style="background:#0f766e;color:#fff;border:0;border-radius:10px;padding:8px 10px;cursor:pointer;margin-left:6px"
-                >
-                  הפוך ל${Number(c.netfree_default_status) === 0 ? "פתוח" : "מעורב"}
-                </button>
                 <button
                   onclick="purgeChannel('${esc(c.channel_id)}')"
                   style="background:#b00;color:#fff;border:0;border-radius:10px;padding:8px 10px;cursor:pointer"
@@ -547,21 +560,24 @@ https://www.youtube.com/c/SomeChannel"
     }
   }
 
-  async function toggleChannelNetfree(channel_id, target_status){
-    const target = Number(target_status) === 0 ? 0 : 1;
-    const message = target === 0
-      ? "להפוך את הערוץ למעורב / לבדיקה? כל הסרטונים של הערוץ יסומנו מחדש כממתינים לבדיקה ויוסתרו עד בדיקה."
-      : "להפוך את הערוץ לפתוח לגמרי? כל הסרטונים של הערוץ יסומנו כפתוחים ויוצגו באתר.";
+  async function setChannelFilterPolicy(channel_id, policy_value){
+    const filter_policy = normalizeFilterPolicyValue(policy_value);
+    const message = `להחליף את מצב הסינון של הערוץ ל: ${filterPolicyLabel(filter_policy)}?
 
-    if(!confirm(message)) return;
+שים לב: פעולה זו מעדכנת גם את etrog_visible לכל סרטוני הערוץ, ובמצב 1/מעבר ממצב 1 היא עשויה לעדכן גם netfree_status.`;
+
+    if(!confirm(message)) {
+      loadChannels();
+      return;
+    }
 
     const res = await fetch("/k9p1/channels", {
       method:"POST",
       headers:{ "content-type":"application/json" },
       body:JSON.stringify({
-        action:"set_netfree_status",
+        action:"set_filter_policy",
         channel_id,
-        netfree_default_status: target
+        filter_policy
       })
     });
 
@@ -576,6 +592,8 @@ https://www.youtube.com/c/SomeChannel"
     if(res.ok && data?.ok){
       loadChannels();
       loadNetfreeQueue();
+    } else {
+      loadChannels();
     }
   }
 

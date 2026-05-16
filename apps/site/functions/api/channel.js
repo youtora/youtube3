@@ -1,5 +1,6 @@
 import { getDB } from "../_db.js";
 import { normalizePublicLang } from "../_shared/language.js";
+import { publicProviderFromRequest, publicVideoIndexName, publicVideoWhereSql } from "../_shared/filter-policy.js";
 function clamp(n, a, b) {
   return Math.max(a, Math.min(b, n));
 }
@@ -102,24 +103,24 @@ function channelSelect(includeFull) {
       `;
 }
 
-function sortParts(sort) {
+function sortParts(sort, provider) {
   switch (sort) {
     case "oldest":
       return {
-        kindIndex: "idx_videos_public_channel_kind_lang_latest_cover",
+        kindIndex: publicVideoIndexName(provider, "idx_videos_public_channel_kind_lang_latest_cover", "idx_videos_etrog_channel_kind_lang_latest_cover"),
         cursorSql: "AND (published_at, id) > (?, ?)",
         orderSql: "published_at ASC, id ASC",
       };
     case "views":
       return {
-        kindIndex: "idx_videos_public_channel_kind_lang_views_cover",
+        kindIndex: publicVideoIndexName(provider, "idx_videos_public_channel_kind_lang_views_cover", "idx_videos_etrog_channel_kind_lang_views_cover"),
         cursorSql: "AND (IFNULL(view_count, 0), published_at, id) < (?, ?, ?)",
         orderSql: "IFNULL(view_count, 0) DESC, published_at DESC, id DESC",
       };
     case "latest":
     default:
       return {
-        kindIndex: "idx_videos_public_channel_kind_lang_latest_cover",
+        kindIndex: publicVideoIndexName(provider, "idx_videos_public_channel_kind_lang_latest_cover", "idx_videos_etrog_channel_kind_lang_latest_cover"),
         cursorSql: "AND (published_at, id) < (?, ?)",
         orderSql: "published_at DESC, id DESC",
       };
@@ -135,15 +136,16 @@ function dbVideoKind(kind) {
   return kind;
 }
 
-function videosSql({ kind, sort, hasCursor }) {
-  const parts = sortParts(sort);
+function videosSql({ kind, sort, hasCursor, provider }) {
+  const parts = sortParts(sort, provider);
+  const publicWhereSql = publicVideoWhereSql(provider, "videos");
   const cursorSql = hasCursor ? parts.cursorSql : "";
 
   return `
     SELECT id, video_id, title, published_at, video_kind, duration_sec, view_count, like_count, comment_count, language_code, language_source
     FROM videos INDEXED BY ${parts.kindIndex}
     WHERE channel_int = ?
-      AND netfree_status = 1
+      AND ${publicWhereSql}
       AND video_kind = ?
       AND language_code = ?
       ${cursorSql}
@@ -189,6 +191,7 @@ export async function onRequest({ env, request }) {
 
   const kind = normalizeVideoKind(url.searchParams.get("kind"));
   const sort = normalizeSort(url.searchParams.get("sort"));
+  const provider = publicProviderFromRequest(request, url);
 
   const videos_limit = intParam(url, "videos_limit", 24, 1, 50);
 
@@ -205,7 +208,7 @@ export async function onRequest({ env, request }) {
 
   if (!chRow) return new Response("not found", { status: 404 });
 
-  const out = { lang, sort };
+  const out = { lang, sort, provider };
   const indexedLanguages = include_channel
     ? await channelIndexedLanguages(env.DB, chRow.id, chRow.languages_json || "[]")
     : [];
@@ -264,7 +267,7 @@ export async function onRequest({ env, request }) {
     }
     binds.push(videos_limit);
 
-    const vids = await env.DB.prepare(videosSql({ kind, sort, hasCursor }))
+    const vids = await env.DB.prepare(videosSql({ kind, sort, hasCursor, provider }))
       .bind(...binds)
       .all();
 
