@@ -2,7 +2,12 @@ import { getDB } from "../_db.js";
 import { normalizePublicLang } from "../_shared/language.js";
 // functions/api/search.js
 // Default: fast title-only FTS over video_fts.
-// Optional future mode: ?scope=all searches title + description/tags/hashtags.
+// Optional mode: ?scope=all searches title + description/tags/hashtags.
+// Optional kind filter:
+//   kind=all  -> all video kinds
+//   kind=V    -> regular videos
+//   kind=S    -> shorts
+//   kind=L    -> live
 
 function cleanQuery(q) {
   const s = (q || "").trim();
@@ -20,6 +25,12 @@ function toFtsMatch(cleaned) {
   return parts.map(p => `"${p}"`).join(" ");
 }
 
+function normalizeSearchKind(value) {
+  const kind = String(value || "all").trim().toUpperCase();
+  if (kind === "V" || kind === "S" || kind === "L") return kind;
+  return "all";
+}
+
 export async function onRequest({ env, request }) {
   env.DB = getDB(env);
   const url = new URL(request.url);
@@ -29,6 +40,10 @@ export async function onRequest({ env, request }) {
   const match = toFtsMatch(cleaned);
   const scope = (url.searchParams.get("scope") || "title").trim().toLowerCase() === "all" ? "all" : "title";
   const lang = normalizePublicLang(url.searchParams.get("lang") || "he", "he");
+  const kind = normalizeSearchKind(url.searchParams.get("kind"));
+
+  const kindSql = kind === "all" ? "" : "AND v.video_kind = ?";
+  const kindBind = kind === "all" ? [] : [kind];
 
   const limit = 50;
 
@@ -37,7 +52,7 @@ export async function onRequest({ env, request }) {
 
   if (!match) {
     return Response.json(
-      { results: [], next_cursor: null, scope },
+      { results: [], next_cursor: null, scope, lang, kind },
       { headers: { "cache-control": "public, max-age=30" } }
     );
   }
@@ -80,10 +95,11 @@ export async function onRequest({ env, request }) {
             ON c.id = v.channel_int
           WHERE v.netfree_status = 1
             AND v.language_code = ?
+            ${kindSql}
             AND v.id < ?
           ORDER BY v.id DESC
           LIMIT ?
-        `).bind(match, match, lang, cursor, limit).all()
+        `).bind(match, match, lang, ...kindBind, cursor, limit).all()
       : await env.DB.prepare(`
           WITH hits AS (
             SELECT rowid AS video_rowid
@@ -117,10 +133,11 @@ export async function onRequest({ env, request }) {
           JOIN channels AS c
             ON c.id = v.channel_int
           WHERE v.netfree_status = 1
-          AND v.language_code = ?
+            AND v.language_code = ?
+            ${kindSql}
           ORDER BY v.id DESC
           LIMIT ?
-        `).bind(match, match, lang, limit).all();
+        `).bind(match, match, lang, ...kindBind, limit).all();
   } else {
     vids = (Number.isFinite(cursor) && cursor > 0)
       ? await env.DB.prepare(`
@@ -145,10 +162,11 @@ export async function onRequest({ env, request }) {
           WHERE video_fts MATCH ?
             AND v.netfree_status = 1
             AND v.language_code = ?
+            ${kindSql}
             AND f.rowid < ?
           ORDER BY f.rowid DESC
           LIMIT ?
-        `).bind(match, lang, cursor, limit).all()
+        `).bind(match, lang, ...kindBind, cursor, limit).all()
       : await env.DB.prepare(`
           SELECT
             v.id,
@@ -171,9 +189,10 @@ export async function onRequest({ env, request }) {
           WHERE video_fts MATCH ?
             AND v.netfree_status = 1
             AND v.language_code = ?
+            ${kindSql}
           ORDER BY f.rowid DESC
           LIMIT ?
-        `).bind(match, lang, limit).all();
+        `).bind(match, lang, ...kindBind, limit).all();
   }
 
   const rows = vids.results || [];
@@ -199,7 +218,7 @@ export async function onRequest({ env, request }) {
       : null;
 
   return Response.json(
-    { results, next_cursor, scope, lang },
+    { results, next_cursor, scope, lang, kind },
     { headers: { "cache-control": "public, max-age=30" } }
   );
 }

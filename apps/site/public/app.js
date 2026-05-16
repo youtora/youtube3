@@ -902,10 +902,36 @@ async function playlistsLoadMore(token){
 /* ---------- SEARCH (with cursor pagination) ---------- */
 let searchState = { key: "", cursor: null, loading: false, done: false, token: 0 };
 
-async function pageSearch(q, scope="title"){
+function normalizeSearchKind(value) {
+  const kind = String(value || "all").trim().toUpperCase();
+  if (kind === "V" || kind === "S" || kind === "L") return kind;
+  return "all";
+}
+
+function searchKindLabel(kind) {
+  if (kind === "V") return "סרטונים";
+  if (kind === "S") return "שורטים";
+  if (kind === "L") return "שידורים חיים";
+  return "הכול";
+}
+
+function searchHref(q, scope, kind) {
+  const searchScope = scope === "all" ? "all" : "title";
+  const searchKind = normalizeSearchKind(kind);
+  const params = new URLSearchParams();
+
+  params.set("q", q);
+  if (searchScope === "all") params.set("scope", "all");
+  if (searchKind !== "all") params.set("kind", searchKind);
+
+  return `/search?${params.toString()}`;
+}
+
+async function pageSearch(q, scope="title", kind="all"){
   stopActiveObserver();
 
   const searchScope = scope === "all" ? "all" : "title";
+  const searchKind = normalizeSearchKind(kind);
 
   if(!q){
     applyRouteMeta({ title:'חיפוש | Youtora', description:'חיפוש ב־Youtora.', canonical:'/search', robots:'noindex,follow' });
@@ -913,13 +939,13 @@ async function pageSearch(q, scope="title"){
     return;
   }
 
-  const canonical = `/search?q=${encodeURIComponent(q)}${searchScope === "all" ? "&scope=all" : ""}`;
+  const canonical = searchHref(q, searchScope, searchKind);
   applyRouteMeta({ title:`חיפוש: ${q} | Youtora`, description:`תוצאות חיפוש עבור ${q} ב־Youtora.`, canonical, robots:'noindex,follow' });
 
   const si = $("searchInput");
   if (si) si.value = q;
 
-  searchState = { key: `${q}|${searchScope}`, cursor: null, loading: false, done: false, token: searchState.token + 1 };
+  searchState = { key: `${q}|${searchScope}|${searchKind}`, cursor: null, loading: false, done: false, token: searchState.token + 1 };
   const t = searchState.token;
 
   setPage(`
@@ -927,8 +953,14 @@ async function pageSearch(q, scope="title"){
     <p class="sub">מילת חיפוש: <b>${esc(q)}</b></p>
 
     <div class="tabs" style="margin-top:10px">
-      <a class="tab ${searchScope === "title" ? "active" : ""}" href="/search?q=${encodeURIComponent(q)}" data-link>כותרות בלבד</a>
-      <a class="tab ${searchScope === "all" ? "active" : ""}" href="/search?q=${encodeURIComponent(q)}&scope=all" data-link>כולל תיאור ותגיות</a>
+      <a class="tab ${searchScope === "title" ? "active" : ""}" href="${searchHref(q, "title", searchKind)}" data-link>כותרות בלבד</a>
+      <a class="tab ${searchScope === "all" ? "active" : ""}" href="${searchHref(q, "all", searchKind)}" data-link>כולל תיאור ותגיות</a>
+    </div>
+
+    <div class="tabs" style="margin-top:10px">
+      ${["all", "V", "S", "L"].map(k => `
+        <a class="tab ${searchKind === k ? "active" : ""}" href="${searchHref(q, searchScope, k)}" data-link>${esc(searchKindLabel(k))}</a>
+      `).join("")}
     </div>
 
     <div class="hr"></div>
@@ -944,24 +976,23 @@ async function pageSearch(q, scope="title"){
     <div id="searchHint" class="muted" style="margin-top:8px"></div>
   `);
 
-  const grid = document.getElementById("searchGrid");
   const btn = document.getElementById("searchMoreBtn");
   const hint = document.getElementById("searchHint");
   const sentinel = document.getElementById("searchSentinel");
 
-  btn.onclick = () => searchLoadMore(t, q, searchScope);
+  btn.onclick = () => searchLoadMore(t, q, searchScope, searchKind);
 
   const hasIO = typeof IntersectionObserver !== "undefined";
   if (!hasIO) btn.style.display = "inline-flex";
 
   // טעינה ראשונה
-  await searchLoadMore(t, q, searchScope);
+  await searchLoadMore(t, q, searchScope, searchKind);
 
   // אינסוף־סקрол
   if (hasIO && !searchState.done) {
     startInfiniteScroll({
       sentinelEl: sentinel,
-      onNearEnd: () => searchLoadMore(t, q, searchScope),
+      onNearEnd: () => searchLoadMore(t, q, searchScope, searchKind),
       enabled: true,
       rootMargin: "200px 0px",
     });
@@ -970,10 +1001,12 @@ async function pageSearch(q, scope="title"){
   if (hint) hint.textContent = searchState.done ? "סוף הרשימה." : "";
 }
 
-async function searchLoadMore(token, q, scope="title"){
+async function searchLoadMore(token, q, scope="title", kind="all"){
   const searchScope = scope === "all" ? "all" : "title";
+  const searchKind = normalizeSearchKind(kind);
+
   if (searchState.loading || searchState.done) return;
-  if (searchState.key !== `${q}|${searchScope}`) return;
+  if (searchState.key !== `${q}|${searchScope}|${searchKind}`) return;
 
   searchState.loading = true;
 
@@ -985,9 +1018,8 @@ async function searchLoadMore(token, q, scope="title"){
   if (hint) hint.textContent = "טוען…";
 
   const url =
-    `/api/search?q=${encodeURIComponent(q)}&limit=50&scope=${encodeURIComponent(searchScope)}` +
+    `/api/search?q=${encodeURIComponent(q)}&limit=50&scope=${encodeURIComponent(searchScope)}&kind=${encodeURIComponent(searchKind)}` +
     (searchState.cursor ? `&cursor=${encodeURIComponent(searchState.cursor)}` : "");
-
 
   let data;
   try {
@@ -1977,7 +2009,7 @@ async function render(){
   if(parts[0] === "live") return pageLive(qs);
   if(parts[0] === "channels") return pageChannels(qs);
   if(parts[0] === "playlists") return pagePlaylists();
-  if(parts[0] === "search") return pageSearch((qs.get("q")||"").trim(), (qs.get("scope")||"title").trim());
+  if(parts[0] === "search") return pageSearch((qs.get("q")||"").trim(), (qs.get("scope")||"title").trim(), (qs.get("kind")||"all").trim());
   if(parts[0] === "hashtag") {
     if(parts.length === 1) return pageTagIndex("hashtag");
     return pageTag(decodeURIComponent(parts[1] || ""), "hashtag");
