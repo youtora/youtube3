@@ -64,8 +64,14 @@ function mapSideVideo(r) {
   };
 }
 
+function normalizeVideoKind(value) {
+  const kind = String(value || "V").trim().toUpperCase();
+  return ["V", "S", "L"].includes(kind) ? kind : "V";
+}
+
 async function loadDiscoverVideos(env, current, limit) {
   const lang = String(current.language_code || "he").trim() || "he";
+  const kind = normalizeVideoKind(current.video_kind);
   const bands = makeDiscoverBands(current.video_id);
   const perBand = 2;
 
@@ -86,10 +92,11 @@ async function loadDiscoverVideos(env, current, limit) {
         c.channel_id,
         c.title AS channel_title,
         c.thumbnail_url AS channel_thumbnail_url
-      FROM videos AS v INDEXED BY idx_videos_public_lang_latest_cover
+      FROM videos AS v INDEXED BY idx_videos_public_kind_lang_latest_cover
       LEFT JOIN channels c
         ON c.id = v.channel_int
       WHERE v.netfree_status = 1
+        AND v.video_kind = ?
         AND v.language_code = ?
         AND v.published_at <= ?
         AND v.published_at >= ?
@@ -101,7 +108,7 @@ async function loadDiscoverVideos(env, current, limit) {
 
   const bindValues = [];
   for (const band of bands) {
-    bindValues.push(lang, band.anchorPub, band.minPub, current.id, perBand);
+    bindValues.push(kind, lang, band.anchorPub, band.minPub, current.id, perBand);
   }
 
   const rows = await env.DB.prepare(selectSql).bind(...bindValues).all();

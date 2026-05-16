@@ -106,14 +106,12 @@ function sortParts(sort) {
   switch (sort) {
     case "oldest":
       return {
-        index: "idx_videos_public_channel_lang_latest_cover",
         kindIndex: "idx_videos_public_channel_kind_lang_latest_cover",
         cursorSql: "AND (published_at, id) > (?, ?)",
         orderSql: "published_at ASC, id ASC",
       };
     case "views":
       return {
-        index: "idx_videos_public_channel_lang_views_cover",
         kindIndex: "idx_videos_public_channel_kind_lang_views_cover",
         cursorSql: "AND (IFNULL(view_count, 0), published_at, id) < (?, ?, ?)",
         orderSql: "IFNULL(view_count, 0) DESC, published_at DESC, id DESC",
@@ -121,7 +119,6 @@ function sortParts(sort) {
     case "latest":
     default:
       return {
-        index: "idx_videos_public_channel_lang_latest_cover",
         kindIndex: "idx_videos_public_channel_kind_lang_latest_cover",
         cursorSql: "AND (published_at, id) < (?, ?)",
         orderSql: "published_at DESC, id DESC",

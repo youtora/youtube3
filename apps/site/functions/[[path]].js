@@ -459,6 +459,8 @@ async function resolveRoute({ url, env }) {
         v.title,
         v.published_at,
         v.channel_int,
+        v.language_code,
+        v.video_kind,
         v.duration_sec,
         v.view_count,
         v.like_count,
@@ -486,13 +488,20 @@ async function resolveRoute({ url, env }) {
         v.title,
         v.published_at,
         v.duration_sec
-      FROM videos v INDEXED BY idx_videos_public_channel_latest_cover
+      FROM videos v INDEXED BY idx_videos_public_channel_kind_lang_latest_cover
       WHERE v.channel_int = ?
         AND v.netfree_status = 1
+        AND v.video_kind = ?
+        AND v.language_code = ?
         AND v.video_id <> ?
       ORDER BY v.published_at DESC, v.id DESC
       LIMIT 12
-    `, [row.channel_int, videoId]);
+    `, [
+      row.channel_int,
+      normalizeVideoKind(row.video_kind),
+      String(row.language_code || "he").trim() || "he",
+      videoId
+    ]);
 
     const title = String(row.title || videoId).trim() || videoId;
     const channelTitle = String(row.channel_title || row.channel_id || "").trim();
@@ -881,6 +890,11 @@ function toIsoDateTime(value) {
   const n = Number(value || 0);
   if (!Number.isFinite(n) || n <= 0) return "";
   return new Date(n * 1000).toISOString();
+}
+
+function normalizeVideoKind(value) {
+  const kind = String(value || "V").trim().toUpperCase();
+  return ["V", "S", "L"].includes(kind) ? kind : "V";
 }
 
 function normalizePath(pathname) {

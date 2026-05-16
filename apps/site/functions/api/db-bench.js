@@ -115,10 +115,12 @@ export async function onRequest({ env, request }) {
       c.channel_id,
       c.title AS channel_title,
       c.thumbnail_url AS channel_thumbnail_url
-    FROM videos AS v INDEXED BY idx_videos_public_latest_cover
+    FROM videos AS v INDEXED BY idx_videos_public_kind_lang_latest_cover
     JOIN channels AS c
       ON c.id = v.channel_int
     WHERE v.netfree_status = 1
+      AND v.video_kind = ?
+      AND v.language_code = ?
     ORDER BY v.published_at DESC, v.id DESC
     LIMIT ?
   `;
@@ -134,11 +136,12 @@ export async function onRequest({ env, request }) {
       c.channel_id,
       c.title AS channel_title,
       c.thumbnail_url AS channel_thumbnail_url
-    FROM videos AS v INDEXED BY idx_videos_public_kind_latest_cover
+    FROM videos AS v INDEXED BY idx_videos_public_kind_lang_latest_cover
     JOIN channels AS c
       ON c.id = v.channel_int
     WHERE v.netfree_status = 1
       AND v.video_kind = ?
+      AND v.language_code = ?
     ORDER BY v.published_at DESC, v.id DESC
     LIMIT ?
   `;
@@ -152,9 +155,11 @@ export async function onRequest({ env, request }) {
 
   const channelVideosSql = `
     SELECT id, video_id, title, published_at, video_kind, duration_sec
-    FROM videos INDEXED BY idx_videos_public_channel_latest_cover
+    FROM videos INDEXED BY idx_videos_public_channel_kind_lang_latest_cover
     WHERE channel_int = ?
       AND netfree_status = 1
+      AND video_kind = ?
+      AND language_code = ?
     ORDER BY published_at DESC, id DESC
     LIMIT ?
   `;
@@ -166,15 +171,15 @@ export async function onRequest({ env, request }) {
   );
 
   results.push(
-    await benchQuery(DB, "latest videos", latestSql, [200], samples)
+    await benchQuery(DB, "latest regular videos", latestSql, ["V", "he", 200], samples)
   );
 
   results.push(
-    await benchQuery(DB, "shorts videos", kindSql, ["S", 200], samples)
+    await benchQuery(DB, "shorts videos", kindSql, ["S", "he", 200], samples)
   );
 
   results.push(
-    await benchQuery(DB, "live videos", kindSql, ["L", 200], samples)
+    await benchQuery(DB, "live videos", kindSql, ["L", "he", 200], samples)
   );
 
   let channelResult = null;
@@ -188,7 +193,7 @@ export async function onRequest({ env, request }) {
         DB,
         "channel videos",
         channelVideosSql,
-        [channel.id, 200],
+        [channel.id, "V", "he", 200],
         samples
       );
     } else {
@@ -200,9 +205,9 @@ export async function onRequest({ env, request }) {
   }
 
   const explains = {
-    latest: await explainQuery(DB, latestSql, [200]),
-    shorts: await explainQuery(DB, kindSql, ["S", 200]),
-    live: await explainQuery(DB, kindSql, ["L", 200])
+    latest: await explainQuery(DB, latestSql, ["V", "he", 200]),
+    shorts: await explainQuery(DB, kindSql, ["S", "he", 200]),
+    live: await explainQuery(DB, kindSql, ["L", "he", 200])
   };
 
   if (channelId) {
@@ -210,7 +215,7 @@ export async function onRequest({ env, request }) {
     const channel = channelRows[0] || null;
 
     if (channel?.id) {
-      explains.channel = await explainQuery(DB, channelVideosSql, [channel.id, 200]);
+      explains.channel = await explainQuery(DB, channelVideosSql, [channel.id, "V", "he", 200]);
     }
   }
 
