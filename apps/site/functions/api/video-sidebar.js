@@ -9,6 +9,11 @@ function normalizeTab(value) {
   return ["discover", "more", "popular", "playlists"].includes(tab) ? tab : "discover";
 }
 
+function normalizeVideoKind(value) {
+  const kind = String(value || "V").trim().toUpperCase();
+  return ["V", "S", "L"].includes(kind) ? kind : "V";
+}
+
 const DISCOVER_BANDS_DAYS = [
   [3, 21],
   [22, 90],
@@ -70,6 +75,7 @@ function mapVideo(r, current) {
 
 async function loadDiscoverVideos(env, current, limit) {
   const lang = String(current.language_code || "he").trim() || "he";
+  const kind = normalizeVideoKind(current.video_kind);
   const bands = makeDiscoverBands(current.video_id);
   const perBand = 2;
 
@@ -90,10 +96,11 @@ async function loadDiscoverVideos(env, current, limit) {
         c.channel_id,
         c.title AS channel_title,
         c.thumbnail_url AS channel_thumbnail_url
-      FROM videos AS v INDEXED BY idx_videos_public_lang_latest_cover
+      FROM videos AS v INDEXED BY idx_videos_public_kind_lang_latest_cover
       LEFT JOIN channels c
         ON c.id = v.channel_int
       WHERE v.netfree_status = 1
+        AND v.video_kind = ?
         AND v.language_code = ?
         AND v.published_at <= ?
         AND v.published_at >= ?
@@ -105,7 +112,7 @@ async function loadDiscoverVideos(env, current, limit) {
 
   const bindValues = [];
   for (const band of bands) {
-    bindValues.push(lang, band.anchorPub, band.minPub, current.id, perBand);
+    bindValues.push(kind, lang, band.anchorPub, band.minPub, current.id, perBand);
   }
 
   const rows = await env.DB.prepare(selectSql).bind(...bindValues).all();
@@ -138,6 +145,7 @@ export async function onRequest({ env, request }) {
       v.video_id,
       v.channel_int,
       v.language_code,
+      v.video_kind,
       c.channel_id,
       c.title AS channel_title,
       c.thumbnail_url
@@ -152,6 +160,7 @@ export async function onRequest({ env, request }) {
   if (!current || !current.channel_int) return Response.json({ error: "not found" }, { status: 404 });
 
   const lang = String(current.language_code || "he").trim() || "he";
+  const kind = normalizeVideoKind(current.video_kind);
 
   if (tab === "discover") {
     const videos = await loadDiscoverVideos(env, current, limit);
@@ -195,6 +204,10 @@ export async function onRequest({ env, request }) {
     ? "IFNULL(view_count, 0) DESC, published_at DESC, id DESC"
     : "published_at DESC, id DESC";
 
+  const indexName = tab === "popular"
+    ? "idx_videos_public_channel_kind_lang_views_cover"
+    : "idx_videos_public_channel_kind_lang_latest_cover";
+
   const rows = await env.DB.prepare(`
     SELECT
       id,
@@ -206,14 +219,15 @@ export async function onRequest({ env, request }) {
       view_count,
       like_count,
       comment_count
-    FROM videos
+    FROM videos INDEXED BY ${indexName}
     WHERE channel_int = ?
       AND netfree_status = 1
+      AND video_kind = ?
       AND video_id <> ?
       AND language_code = ?
     ORDER BY ${orderSql}
     LIMIT ?
-  `).bind(current.channel_int, video_id, lang, limit).all();
+  `).bind(current.channel_int, kind, video_id, lang, limit).all();
 
   return Response.json(
     {
