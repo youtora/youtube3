@@ -226,24 +226,45 @@ function videoKindLabel(kind){
 }
 
 const FILTER_PROVIDER_KEY = "youtora_filter_provider_v1";
+const FILTER_PROVIDER_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+const FILTER_PROVIDER_COOKIE_MAX_AGE = 14 * 24 * 60 * 60;
+let filterProviderDetectingPromise = null;
 
 function normalizeFilterProvider(value){
-  return String(value || "netfree").trim().toLowerCase() === "etrog" ? "etrog" : "netfree";
+  return String(value || "etrog").trim().toLowerCase() === "netfree" ? "netfree" : "etrog";
+}
+
+function getSavedFilterProviderRecord(){
+  try{
+    const raw = localStorage.getItem(FILTER_PROVIDER_KEY);
+    if(!raw) return null;
+
+    try{
+      const data = JSON.parse(raw);
+      return {
+        provider: normalizeFilterProvider(data?.provider),
+        checkedAt: Number(data?.checkedAt || 0)
+      };
+    }catch{
+      return {
+        provider: normalizeFilterProvider(raw),
+        checkedAt: 0
+      };
+    }
+  }catch{
+    return null;
+  }
+}
+
+function isFreshFilterProviderRecord(record){
+  if(!record || !record.checkedAt) return false;
+  return Date.now() - record.checkedAt < FILTER_PROVIDER_MAX_AGE_MS;
 }
 
 function getSavedFilterProvider(){
-  try{
-    const raw = localStorage.getItem(FILTER_PROVIDER_KEY);
-    if(!raw) return "netfree";
-    try{
-      const data = JSON.parse(raw);
-      return normalizeFilterProvider(data?.provider || raw);
-    }catch{
-      return normalizeFilterProvider(raw);
-    }
-  }catch{
-    return "netfree";
-  }
+  const record = getSavedFilterProviderRecord();
+  if(!record) return "etrog";
+  return normalizeFilterProvider(record.provider);
 }
 
 function getUrlFilterProvider(){
@@ -259,7 +280,12 @@ function getUrlFilterProvider(){
 function getCurrentFilterProvider(){
   const fromUrl = getUrlFilterProvider();
   if(fromUrl) return saveFilterProvider(fromUrl);
-  return getSavedFilterProvider();
+
+  const saved = getSavedFilterProviderRecord();
+  if(isFreshFilterProviderRecord(saved)) return normalizeFilterProvider(saved.provider);
+
+  // ברירת המחדל היא אתרוג/פתוח. אם יזוהה נטפרי, detection ירנדר מחדש.
+  return "etrog";
 }
 
 function saveFilterProvider(provider){
@@ -268,9 +294,52 @@ function saveFilterProvider(provider){
     localStorage.setItem(FILTER_PROVIDER_KEY, JSON.stringify({ provider: value, checkedAt: Date.now() }));
   }catch{}
   try{
-    document.cookie = `filter_provider=${encodeURIComponent(value)}; Max-Age=43200; Path=/; SameSite=Lax; Secure`;
+    document.cookie = `filter_provider=${encodeURIComponent(value)}; Max-Age=${FILTER_PROVIDER_COOKIE_MAX_AGE}; Path=/; SameSite=Lax; Secure`;
   }catch{}
   return value;
+}
+
+async function detectFilterProviderIfNeeded(){
+  const fromUrl = getUrlFilterProvider();
+  if(fromUrl){
+    saveFilterProvider(fromUrl);
+    return fromUrl;
+  }
+
+  const saved = getSavedFilterProviderRecord();
+  if(isFreshFilterProviderRecord(saved)){
+    return normalizeFilterProvider(saved.provider);
+  }
+
+  if(filterProviderDetectingPromise) return filterProviderDetectingPromise;
+
+  filterProviderDetectingPromise = (async()=>{
+    const before = getCurrentFilterProvider();
+
+    let isNetfree = false;
+    try{
+      const results = await Promise.all([
+        canReachNetfreeProbeUrl("https://api.internal.netfree.link/user/0"),
+        canReachNetfreeProbeUrl("https://certx2.internal.netfree.link/user/0")
+      ]);
+      isNetfree = results.some(Boolean);
+    }catch{
+      isNetfree = false;
+    }
+
+    const detected = saveFilterProvider(isNetfree ? "netfree" : "etrog");
+
+    // אם נטען כבר אתרוג ואז זוהה נטפרי — מרנדרים מחדש כדי להציג תצוגה סגורה.
+    if(before !== detected){
+      render().catch(showErr);
+    }
+
+    return detected;
+  })().finally(()=>{
+    filterProviderDetectingPromise = null;
+  });
+
+  return filterProviderDetectingPromise;
 }
 
 function withFilterProvider(url){
@@ -489,13 +558,8 @@ async function updateNetfreeProbeBanner(){
   const el = document.getElementById("netfreeProbeBanner");
   if(!el) return;
 
-  const results = await Promise.all([
-    canReachNetfreeProbeUrl("https://api.internal.netfree.link/user/0"),
-    canReachNetfreeProbeUrl("https://certx2.internal.netfree.link/user/0")
-  ]);
-
-  const isNetfree = results.some(Boolean);
-  const provider = saveFilterProvider(isNetfree ? "netfree" : "etrog");
+  const provider = await detectFilterProviderIfNeeded().catch(() => getCurrentFilterProvider());
+  const isNetfree = provider === "netfree";
 
   el.textContent = isNetfree
     ? "בדיקת סינון: נראה שאתה גולש דרך נטפרי"
@@ -2105,3 +2169,4 @@ async function render(){
 hookLinks();
 headerSearch();
 render().catch(showErr);
+detectFilterProviderIfNeeded().catch(() => saveFilterProvider("etrog"));
