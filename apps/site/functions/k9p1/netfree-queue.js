@@ -131,7 +131,8 @@ function rowQuery(whereSql, sort = "priority") {
       c.title AS channel_title,
       c.thumbnail_url AS channel_thumbnail_url,
       c.netfree_default_status,
-      c.show_in_public_channels
+      c.show_in_public_channels,
+      c.filter_policy
     FROM videos v
     JOIN channels c ON c.id = v.channel_int
     ${whereSql}
@@ -145,31 +146,43 @@ async function loadCounts(DB, minPendingAgeDays = 7) {
   const pendingCutoff = t - (minPendingAgeDays * 86400);
 
   const counts = await DB.prepare(`
-    SELECT netfree_status, COUNT(*) AS count
-    FROM videos
-    GROUP BY netfree_status
+    SELECT v.netfree_status AS netfree_status, COUNT(*) AS count
+    FROM videos v
+    JOIN channels c ON c.id = v.channel_int
+    WHERE COALESCE(c.filter_policy, 0) NOT IN (5, 6)
+      AND COALESCE(c.netfree_default_status, 0) <> 2
+    GROUP BY v.netfree_status
     ORDER BY netfree_status
   `).all();
 
   const pendingReady = await DB.prepare(`
     SELECT COUNT(*) AS count
-    FROM videos
-    WHERE netfree_status = 0
-      AND netfree_discovered_at <= ?
+    FROM videos v
+    JOIN channels c ON c.id = v.channel_int
+    WHERE v.netfree_status = 0
+      AND v.netfree_discovered_at <= ?
+      AND COALESCE(c.filter_policy, 0) NOT IN (5, 6)
+      AND COALESCE(c.netfree_default_status, 0) <> 2
   `).bind(pendingCutoff).first();
 
   const pendingTooNew = await DB.prepare(`
     SELECT COUNT(*) AS count
-    FROM videos
-    WHERE netfree_status = 0
-      AND netfree_discovered_at > ?
+    FROM videos v
+    JOIN channels c ON c.id = v.channel_int
+    WHERE v.netfree_status = 0
+      AND v.netfree_discovered_at > ?
+      AND COALESCE(c.filter_policy, 0) NOT IN (5, 6)
+      AND COALESCE(c.netfree_default_status, 0) <> 2
   `).bind(pendingCutoff).first();
 
   const recheckDue = await DB.prepare(`
     SELECT COUNT(*) AS count
-    FROM videos
-    WHERE netfree_status = 5
-      AND netfree_recheck_after <= ?
+    FROM videos v
+    JOIN channels c ON c.id = v.channel_int
+    WHERE v.netfree_status = 5
+      AND v.netfree_recheck_after <= ?
+      AND COALESCE(c.filter_policy, 0) NOT IN (5, 6)
+      AND COALESCE(c.netfree_default_status, 0) <> 2
   `).bind(t).first();
 
   const byChannel = await DB.prepare(`
@@ -183,6 +196,8 @@ async function loadCounts(DB, minPendingAgeDays = 7) {
     FROM channels c
     JOIN videos v ON v.channel_int = c.id
     WHERE v.netfree_status IN (0, 5)
+      AND COALESCE(c.filter_policy, 0) NOT IN (5, 6)
+      AND COALESCE(c.netfree_default_status, 0) <> 2
     GROUP BY c.id
     ORDER BY pending_count DESC, c.id DESC
     LIMIT 20
@@ -236,6 +251,10 @@ async function listQueue({ DB, url }) {
   const args = [];
 
   addStatusWhere({ where, args, statusFilter, pendingCutoff, t });
+
+  // ערוצים במסלולים 5/6 חסומים לגמרי בנטפרי, ולכן לא נכנסים לתור בדיקת נטפרי.
+  where.push("COALESCE(c.filter_policy, 0) NOT IN (5, 6)");
+  where.push("COALESCE(c.netfree_default_status, 0) <> 2");
 
   if (channelId) {
     where.push("c.channel_id = ?");

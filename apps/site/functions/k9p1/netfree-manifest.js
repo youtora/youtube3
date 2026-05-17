@@ -31,13 +31,16 @@ async function loadPending(DB, { limit, cutoff }) {
 
   const rows = await DB.prepare(`
     SELECT
-      id,
-      video_id,
-      netfree_status AS s
-    FROM videos
-    WHERE netfree_status = 0
-      AND netfree_discovered_at <= ?
-    ORDER BY netfree_discovered_at ASC, id ASC
+      v.id,
+      v.video_id,
+      v.netfree_status AS s
+    FROM videos v
+    JOIN channels c ON c.id = v.channel_int
+    WHERE v.netfree_status = 0
+      AND v.netfree_discovered_at <= ?
+      AND COALESCE(c.filter_policy, 0) NOT IN (5, 6)
+      AND COALESCE(c.netfree_default_status, 0) <> 2
+    ORDER BY v.netfree_discovered_at ASC, v.id ASC
     LIMIT ?
   `).bind(cutoff, limit).all();
 
@@ -49,13 +52,16 @@ async function loadRecheck(DB, { limit, t }) {
 
   const rows = await DB.prepare(`
     SELECT
-      id,
-      video_id,
-      netfree_status AS s
-    FROM videos
-    WHERE netfree_status = 5
-      AND netfree_recheck_after <= ?
-    ORDER BY netfree_recheck_after ASC, id ASC
+      v.id,
+      v.video_id,
+      v.netfree_status AS s
+    FROM videos v
+    JOIN channels c ON c.id = v.channel_int
+    WHERE v.netfree_status = 5
+      AND v.netfree_recheck_after <= ?
+      AND COALESCE(c.filter_policy, 0) NOT IN (5, 6)
+      AND COALESCE(c.netfree_default_status, 0) <> 2
+    ORDER BY v.netfree_recheck_after ASC, v.id ASC
     LIMIT ?
   `).bind(t, limit).all();
 

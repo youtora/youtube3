@@ -345,9 +345,9 @@ function normalizeVideoKindForDb(value){
   return kind === "S" || kind === "L" ? kind : "V";
 }
 
-function normalizeFilterPolicyForDb(value, fallback = 3){
+function normalizeFilterPolicyForDb(value, fallback = 0){
   const n = Number(value);
-  return [1, 2, 3, 4, 5, 6].includes(n) ? n : fallback;
+  return [0, 1, 2, 3, 4, 5, 6].includes(n) ? n : fallback;
 }
 
 function normalizeNetfreeDefaultStatusForDb(value){
@@ -356,7 +356,7 @@ function normalizeNetfreeDefaultStatusForDb(value){
 }
 
 function etrogVisibleFromPolicyStatus(policy, status){
-  const p = normalizeFilterPolicyForDb(policy, 3);
+  const p = normalizeFilterPolicyForDb(policy, 0);
   const s = Number(status);
   if(s === 4) return 0;
   if(p === 1) return 1;
@@ -780,7 +780,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
       published_at: Number(raw?.published_at || 0) || 0,
       channel_language_code: raw?.channel_language_code || raw?.language_code || "",
       netfree_default_status: normalizeNetfreeDefaultStatusForDb(raw?.netfree_default_status),
-      filter_policy: normalizeFilterPolicyForDb(raw?.filter_policy, Number(raw?.netfree_default_status) === 1 ? 1 : 3)
+      filter_policy: normalizeFilterPolicyForDb(raw?.filter_policy, 0)
     });
   }
 
@@ -907,7 +907,7 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
       published_at: Number(raw?.published_at || 0) || 0,
       channel_language_code: raw?.channel_language_code || raw?.language_code || "",
       netfree_default_status: normalizeNetfreeDefaultStatusForDb(raw?.netfree_default_status),
-      filter_policy: normalizeFilterPolicyForDb(raw?.filter_policy, Number(raw?.netfree_default_status) === 1 ? 1 : 3)
+      filter_policy: normalizeFilterPolicyForDb(raw?.filter_policy, 0)
     });
   }
 
@@ -1185,7 +1185,7 @@ async function backfillSome(env, maxCalls=1){
           published_at: toUnixSeconds(sn?.publishedAt || null) || 0,
           channel_language_code: r.language_code || "",
           netfree_default_status: normalizeNetfreeDefaultStatusForDb(r.netfree_default_status),
-          filter_policy: r.filter_policy ?? (Number(r.netfree_default_status) === 1 ? 1 : 3)
+          filter_policy: r.filter_policy ?? 0
         });
       }
 
@@ -1416,7 +1416,7 @@ async function catchUpFeeds(env, maxChannels=5){
             published_at: e.published_at || 0,
             channel_language_code: ch.language_code || "",
             netfree_default_status: normalizeNetfreeDefaultStatusForDb(ch.netfree_default_status),
-            filter_policy: ch.filter_policy ?? (Number(ch.netfree_default_status) === 1 ? 1 : 3)
+            filter_policy: ch.filter_policy ?? 0
           });
         }
 

@@ -11,6 +11,95 @@ function json(data, status = 200) {
   });
 }
 
+async function countChannelVideos(DB, channel_int) {
+  const rows = await DB.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN netfree_status = 1 THEN 1 ELSE 0 END) AS netfree_open,
+      SUM(CASE WHEN netfree_status = 2 THEN 1 ELSE 0 END) AS netfree_blocked,
+      SUM(CASE WHEN etrog_visible = 1 THEN 1 ELSE 0 END) AS etrog_visible
+    FROM videos
+    WHERE channel_int = ?
+  `).bind(channel_int).first();
+
+  return {
+    total: Number(rows?.total || 0),
+    netfree_open: Number(rows?.netfree_open || 0),
+    netfree_blocked: Number(rows?.netfree_blocked || 0),
+    etrog_visible: Number(rows?.etrog_visible || 0)
+  };
+}
+
+async function syncChannelVideosForFilterPolicy(DB, channel_int, filter_policy, previous_policy, previous_netfree_default_status, t) {
+  const previousWasForced =
+    isNetfreeForcedPolicy(previous_policy) ||
+    Number(previous_netfree_default_status) === 1 ||
+    Number(previous_netfree_default_status) === 2;
+
+  const currentIsForced = isNetfreeForcedPolicy(filter_policy);
+
+  if (currentIsForced) {
+    return DB.prepare(`
+      UPDATE videos
+      SET
+        netfree_status = CASE
+          WHEN netfree_status = 4 THEN 4
+          ELSE ?
+        END,
+        etrog_visible = CASE
+          WHEN netfree_status = 4 THEN 0
+          WHEN ? = 1 THEN 1
+          WHEN ? = 5 THEN 1
+          WHEN ? = 6 THEN 0
+          ELSE 0
+        END,
+        netfree_recheck_after = NULL,
+        updated_at = ?
+      WHERE channel_int = ?
+    `).bind(
+      netfreeStatusForForcedPolicy(filter_policy, 0),
+      filter_policy,
+      filter_policy,
+      filter_policy,
+      t,
+      channel_int
+    ).run();
+  }
+
+  if (previousWasForced) {
+    return DB.prepare(`
+      UPDATE videos
+      SET
+        netfree_status = CASE WHEN netfree_status = 4 THEN 4 ELSE 0 END,
+        etrog_visible = CASE
+          WHEN netfree_status = 4 THEN 0
+          WHEN ? = 2 THEN 1
+          WHEN ? = 3 THEN 1
+          WHEN ? = 4 THEN 0
+          ELSE 0
+        END,
+        netfree_recheck_after = NULL,
+        netfree_discovered_at = COALESCE(published_at, netfree_discovered_at, updated_at, ?),
+        updated_at = ?
+      WHERE channel_int = ?
+    `).bind(filter_policy, filter_policy, filter_policy, t, t, channel_int).run();
+  }
+
+  return DB.prepare(`
+    UPDATE videos
+    SET
+      etrog_visible = CASE
+        WHEN netfree_status = 4 THEN 0
+        WHEN ? = 2 THEN 1
+        WHEN ? = 3 AND netfree_status <> 2 THEN 1
+        WHEN ? = 4 AND netfree_status = 1 THEN 1
+        ELSE 0
+      END,
+      updated_at = ?
+    WHERE channel_int = ?
+  `).bind(filter_policy, filter_policy, filter_policy, t, channel_int).run();
+}
+
 export async function onRequest({ env, request }) {
 
   env.DB = getDB(env);
@@ -73,8 +162,8 @@ export async function onRequest({ env, request }) {
         ? body.filter_policy
         : (Number(body.netfree_default_status ?? body.status) === 1 ? 1 : 3);
 
-      const filter_policy = normalizeFilterPolicy(requestedPolicy, 3);
-      const previousPolicy = normalizeFilterPolicy(ch.filter_policy ?? (Number(ch.netfree_default_status) === 1 ? 1 : 3), 3);
+      const filter_policy = normalizeFilterPolicy(requestedPolicy, 0);
+      const previousPolicy = normalizeFilterPolicy(ch.filter_policy ?? 0, 0);
       const netfree_default_status = netfreeDefaultStatusForPolicy(filter_policy);
       const show_in_public_channels = showInPublicChannelsForPolicy(filter_policy);
       const t = nowSec();
@@ -89,68 +178,16 @@ export async function onRequest({ env, request }) {
         WHERE id = ?
       `).bind(filter_policy, netfree_default_status, show_in_public_channels, t, channel_int).run();
 
-      let videoUpdate;
-      const previousWasForced = isNetfreeForcedPolicy(previousPolicy) || Number(ch.netfree_default_status) === 1 || Number(ch.netfree_default_status) === 2;
-      const currentIsForced = isNetfreeForcedPolicy(filter_policy);
-
-      if (currentIsForced) {
-        videoUpdate = await env.DB.prepare(`
-          UPDATE videos
-          SET
-            netfree_status = CASE
-              WHEN netfree_status = 4 THEN 4
-              ELSE ?
-            END,
-            etrog_visible = CASE
-              WHEN netfree_status = 4 THEN 0
-              WHEN ? = 1 THEN 1
-              WHEN ? = 5 THEN 1
-              WHEN ? = 6 THEN 0
-              ELSE 0
-            END,
-            netfree_recheck_after = NULL,
-            updated_at = ?
-          WHERE channel_int = ?
-        `).bind(
-          netfreeStatusForForcedPolicy(filter_policy, 0),
-          filter_policy,
-          filter_policy,
-          filter_policy,
-          t,
-          channel_int
-        ).run();
-      } else if (previousWasForced) {
-        videoUpdate = await env.DB.prepare(`
-          UPDATE videos
-          SET
-            netfree_status = CASE WHEN netfree_status = 4 THEN 4 ELSE 0 END,
-            etrog_visible = CASE
-              WHEN netfree_status = 4 THEN 0
-              WHEN ? = 2 THEN 1
-              WHEN ? = 3 THEN 1
-              WHEN ? = 4 THEN 0
-              ELSE 0
-            END,
-            netfree_recheck_after = NULL,
-            netfree_discovered_at = COALESCE(published_at, netfree_discovered_at, updated_at, ?),
-            updated_at = ?
-          WHERE channel_int = ?
-        `).bind(filter_policy, filter_policy, filter_policy, t, t, channel_int).run();
-      } else {
-        videoUpdate = await env.DB.prepare(`
-          UPDATE videos
-          SET
-            etrog_visible = CASE
-              WHEN netfree_status = 4 THEN 0
-              WHEN ? = 2 THEN 1
-              WHEN ? = 3 AND netfree_status <> 2 THEN 1
-              WHEN ? = 4 AND netfree_status = 1 THEN 1
-              ELSE 0
-            END,
-            updated_at = ?
-          WHERE channel_int = ?
-        `).bind(filter_policy, filter_policy, filter_policy, t, channel_int).run();
-      }
+      const beforeVideos = await countChannelVideos(env.DB, channel_int);
+      const videoUpdate = await syncChannelVideosForFilterPolicy(
+        env.DB,
+        channel_int,
+        filter_policy,
+        previousPolicy,
+        ch.netfree_default_status,
+        t
+      );
+      const afterVideos = await countChannelVideos(env.DB, channel_int);
 
       return json({
         ok: true,
@@ -163,7 +200,9 @@ export async function onRequest({ env, request }) {
         changed: {
           channels: chUpdate?.meta?.changes || 0,
           videos: videoUpdate?.meta?.changes || 0
-        }
+        },
+        videos_before: beforeVideos,
+        videos_after: afterVideos
       });
     }
 

@@ -1,3 +1,4 @@
+export const FILTER_POLICY_UNSET = 0;
 export const FILTER_POLICY_OPEN_ALL = 1;
 export const FILTER_POLICY_NETFREE_CHECK_ETROG_OPEN = 2;
 export const FILTER_POLICY_NETFREE_ETROG_CHECK = 3;
@@ -5,15 +6,18 @@ export const FILTER_POLICY_SENSITIVE = 4;
 export const FILTER_POLICY_NETFREE_BLOCKED_ETROG_OPEN = 5;
 export const FILTER_POLICY_NETFREE_BLOCKED_ETROG_SENSITIVE = 6;
 
-const VALID_FILTER_POLICIES = [1, 2, 3, 4, 5, 6];
+const VALID_FILTER_POLICIES = [0, 1, 2, 3, 4, 5, 6];
 
-export function normalizeFilterPolicy(value, fallback = FILTER_POLICY_NETFREE_ETROG_CHECK) {
+export function normalizeFilterPolicy(value, fallback = FILTER_POLICY_UNSET) {
   const n = Number(value);
   return VALID_FILTER_POLICIES.includes(n) ? n : fallback;
 }
 
 export function netfreeDefaultStatusForPolicy(policy) {
   const p = normalizeFilterPolicy(policy);
+
+  // 0 = לא הוגדר ידנית, נשאר במסלול בדיקה רגיל אבל לא מוצג באתרוג.
+  if (p === FILTER_POLICY_UNSET) return 0;
 
   // 1 = פתוח לגמרי בנטפרי.
   if (p === FILTER_POLICY_OPEN_ALL) return 1;
@@ -54,6 +58,7 @@ export function etrogVisibleFromPolicyStatus(policy, status) {
   // 4 = unavailable. Do not show unavailable videos in Etrog either.
   if (s === 4) return 0;
 
+  if (p === FILTER_POLICY_UNSET) return 0;
   if (p === FILTER_POLICY_OPEN_ALL) return 1;
   if (p === FILTER_POLICY_NETFREE_CHECK_ETROG_OPEN) return 1;
   if (p === FILTER_POLICY_NETFREE_ETROG_CHECK) return s === 2 ? 0 : 1;
@@ -64,9 +69,10 @@ export function etrogVisibleFromPolicyStatus(policy, status) {
   return 0;
 }
 
-export function etrogVisibleSqlCase(policySql = "COALESCE(c.filter_policy, 3)", statusSql = "v.netfree_status") {
+export function etrogVisibleSqlCase(policySql = "COALESCE(c.filter_policy, 0)", statusSql = "v.netfree_status") {
   return `CASE
     WHEN ${statusSql} = 4 THEN 0
+    WHEN ${policySql} = 0 THEN 0
     WHEN ${policySql} = 1 THEN 1
     WHEN ${policySql} = 2 THEN 1
     WHEN ${policySql} = 3 AND ${statusSql} <> 2 THEN 1

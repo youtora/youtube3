@@ -127,12 +127,12 @@ async function updateChunk(DB, items, { recheckDays, t }) {
     UPDATE videos
     SET etrog_visible = CASE
       WHEN netfree_status = 4 THEN 0
-      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 1 THEN 1
-      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 2 THEN 1
-      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 3 AND netfree_status <> 2 THEN 1
-      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 4 AND netfree_status = 1 THEN 1
-      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 5 THEN 1
-      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 6 AND netfree_status = 1 THEN 1
+      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 1 THEN 1
+      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 2 THEN 1
+      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 3 AND netfree_status <> 2 THEN 1
+      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 4 AND netfree_status = 1 THEN 1
+      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 5 THEN 1
+      WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 6 AND netfree_status = 1 THEN 1
       ELSE 0
     END
     WHERE id IN (${idPlaceholders})

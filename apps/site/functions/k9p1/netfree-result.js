@@ -128,12 +128,12 @@ export async function onRequest({ env, request }) {
         netfree_recheck_after = ?,
         etrog_visible = CASE
           WHEN ? = 4 THEN 0
-          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 1 THEN 1
-          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 2 THEN 1
-          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 3 AND ? <> 2 THEN 1
-          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 4 AND ? = 1 THEN 1
-          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 5 THEN 1
-          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 6 AND ? = 1 THEN 1
+          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 1 THEN 1
+          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 2 THEN 1
+          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 3 AND ? <> 2 THEN 1
+          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 4 AND ? = 1 THEN 1
+          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 5 THEN 1
+          WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 0) = 6 AND ? = 1 THEN 1
           ELSE 0
         END,
         netfree_discovered_at = CASE

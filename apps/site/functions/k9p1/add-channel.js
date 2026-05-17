@@ -1,7 +1,7 @@
 import { getDB } from "../_db.js";
 import { fetchVideoMeta as fetchFullVideoMeta, videoDetailsStmts, inferVideoLanguage } from "../_shared/video-meta.js";
 import { buildChannelLanguage, channelLanguageStmts, channelVideoLanguageStmts } from "../_shared/language.js";
-import { etrogVisibleFromPolicyStatus, netfreeDefaultStatusForPolicy, normalizeFilterPolicy, showInPublicChannelsForPolicy } from "../_shared/filter-policy.js";
+import { etrogVisibleFromPolicyStatus, isNetfreeForcedPolicy, netfreeDefaultStatusForPolicy, netfreeStatusForForcedPolicy, normalizeFilterPolicy, showInPublicChannelsForPolicy } from "../_shared/filter-policy.js";
 
 function unauthorized() { return new Response("unauthorized", { status: 401 }); }
 function nowSec() { return Math.floor(Date.now() / 1000); }
@@ -389,7 +389,52 @@ async function syncChannelLanguagesSafely({ DB, channel_int, languages, source, 
   }
 }
 
-async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, channel_language_code = "", netfree_default_status = 1, filter_policy = 3, max_pages = 2, language_index_ready = true }) {
+
+async function syncExistingVideosForChannelPolicy(DB, channel_int, filter_policy, t) {
+  if (isNetfreeForcedPolicy(filter_policy)) {
+    return DB.prepare(`
+      UPDATE videos
+      SET
+        netfree_status = CASE
+          WHEN netfree_status = 4 THEN 4
+          ELSE ?
+        END,
+        etrog_visible = CASE
+          WHEN netfree_status = 4 THEN 0
+          WHEN ? = 1 THEN 1
+          WHEN ? = 5 THEN 1
+          WHEN ? = 6 THEN 0
+          ELSE 0
+        END,
+        netfree_recheck_after = NULL,
+        updated_at = ?
+      WHERE channel_int = ?
+    `).bind(
+      netfreeStatusForForcedPolicy(filter_policy, 0),
+      filter_policy,
+      filter_policy,
+      filter_policy,
+      t,
+      channel_int
+    ).run();
+  }
+
+  return DB.prepare(`
+    UPDATE videos
+    SET
+      etrog_visible = CASE
+        WHEN netfree_status = 4 THEN 0
+        WHEN ? = 2 THEN 1
+        WHEN ? = 3 AND netfree_status <> 2 THEN 1
+        WHEN ? = 4 AND netfree_status = 1 THEN 1
+        ELSE 0
+      END,
+      updated_at = ?
+    WHERE channel_int = ?
+  `).bind(filter_policy, filter_policy, filter_policy, t, channel_int).run();
+}
+
+async function importRecentVideosForChannel({ env, DB, channel_int, uploads_playlist_id, channel_language_code = "", netfree_default_status = 0, filter_policy = 0, max_pages = 2, language_index_ready = true }) {
   if (!env.YT_API_KEY) return { ok: false, reason: "missing YT_API_KEY", imported: 0, next_page_token: null, done: 0 };
   if (!uploads_playlist_id) return { ok: false, reason: "missing uploads playlist", imported: 0, next_page_token: null, done: 1 };
 
@@ -562,8 +607,8 @@ export async function onRequest({ env, request }) {
   const playlists_pages = Math.min(Math.max(parseInt(body.playlists_pages || "10", 10), 1), 30);
   const videos_pages = Math.min(Math.max(parseInt(body.videos_pages || "2", 10), 0), 10);
   const filter_policy = normalizeFilterPolicy(
-    body.filter_policy ?? (Number(body.netfree_default_status) === 1 ? 1 : 3),
-    3
+    body.filter_policy ?? 0,
+    0
   );
   const netfree_default_status = netfreeDefaultStatusForPolicy(filter_policy);
   const show_in_public_channels = showInPublicChannelsForPolicy(filter_policy);
@@ -678,6 +723,13 @@ export async function onRequest({ env, request }) {
   const ch = await DB.prepare(`SELECT id, netfree_default_status, filter_policy FROM channels WHERE channel_id=?`).bind(channel_id).first();
   if (!ch) return new Response("failed to load channel row", { status: 500 });
   const channel_int = ch.id;
+
+  const existingVideoSync = await syncExistingVideosForChannelPolicy(
+    DB,
+    channel_int,
+    ch.filter_policy ?? filter_policy,
+    t
+  );
 
   const warnings = [];
   let language_index_ready = await hasChannelLanguageStore(DB).catch((error) => {
@@ -796,6 +848,9 @@ export async function onRequest({ env, request }) {
     websub,
     playlists,
     videos,
+    existing_video_sync: {
+      changed: existingVideoSync?.meta?.changes || 0
+    },
     warnings,
   });
 }
