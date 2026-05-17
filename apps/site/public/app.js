@@ -225,13 +225,12 @@ function videoKindLabel(kind){
   return "";
 }
 
-const FILTER_PROVIDER_KEY = "youtora_filter_provider_v1";
-const FILTER_PROVIDER_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+const FILTER_PROVIDER_KEY = "youtora_filter_provider_v2";
 const FILTER_PROVIDER_COOKIE_MAX_AGE = 14 * 24 * 60 * 60;
-let filterProviderDetectingPromise = null;
+const FILTER_PROVIDER_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
 function normalizeFilterProvider(value){
-  return String(value || "etrog").trim().toLowerCase() === "netfree" ? "netfree" : "etrog";
+  return String(value || "").trim().toLowerCase() === "netfree" ? "netfree" : "etrog";
 }
 
 function getSavedFilterProviderRecord(){
@@ -241,57 +240,43 @@ function getSavedFilterProviderRecord(){
 
     try{
       const data = JSON.parse(raw);
-      return {
-        provider: normalizeFilterProvider(data?.provider),
-        checkedAt: Number(data?.checkedAt || 0)
-      };
+      const provider = normalizeFilterProvider(data?.provider);
+      const checkedAt = Number(data?.checkedAt || 0);
+      return { provider, checkedAt };
     }catch{
-      return {
-        provider: normalizeFilterProvider(raw),
-        checkedAt: 0
-      };
+      return { provider: normalizeFilterProvider(raw), checkedAt: 0 };
     }
   }catch{
     return null;
   }
 }
 
-function isFreshFilterProviderRecord(record){
-  if(!record || !record.checkedAt) return false;
-  return Date.now() - record.checkedAt < FILTER_PROVIDER_MAX_AGE_MS;
+function hasFreshSavedFilterProvider(){
+  const data = getSavedFilterProviderRecord();
+  return !!(data && data.checkedAt && Date.now() - data.checkedAt < FILTER_PROVIDER_MAX_AGE_MS);
 }
 
 function getSavedFilterProvider(){
-  const record = getSavedFilterProviderRecord();
-  if(!record) return "etrog";
-  return normalizeFilterProvider(record.provider);
+  const data = getSavedFilterProviderRecord();
+  return data?.provider || "etrog";
 }
 
 function getUrlFilterProvider(){
   try{
     const raw = new URLSearchParams(location.search).get("provider");
-    if(raw === null) return "";
-    return normalizeFilterProvider(raw);
+    const value = String(raw || "").trim().toLowerCase();
+    return value === "netfree" || value === "etrog" ? value : "";
   }catch{
     return "";
   }
 }
 
-function getCurrentFilterProvider(){
-  const fromUrl = getUrlFilterProvider();
-  if(fromUrl) return saveFilterProvider(fromUrl);
-
-  const saved = getSavedFilterProviderRecord();
-  if(isFreshFilterProviderRecord(saved)) return normalizeFilterProvider(saved.provider);
-
-  // ברירת המחדל היא אתרוג/פתוח. אם יזוהה נטפרי, detection ירנדר מחדש.
-  return "etrog";
-}
-
 function saveFilterProvider(provider){
   const value = normalizeFilterProvider(provider);
+  const checkedAt = Date.now();
   try{
-    localStorage.setItem(FILTER_PROVIDER_KEY, JSON.stringify({ provider: value, checkedAt: Date.now() }));
+    localStorage.setItem(FILTER_PROVIDER_KEY, JSON.stringify({ provider: value, checkedAt }));
+    localStorage.removeItem("youtora_filter_provider_v1");
   }catch{}
   try{
     document.cookie = `filter_provider=${encodeURIComponent(value)}; Max-Age=${FILTER_PROVIDER_COOKIE_MAX_AGE}; Path=/; SameSite=Lax; Secure`;
@@ -299,47 +284,27 @@ function saveFilterProvider(provider){
   return value;
 }
 
-async function detectFilterProviderIfNeeded(){
+function getCurrentFilterProvider(){
   const fromUrl = getUrlFilterProvider();
-  if(fromUrl){
-    saveFilterProvider(fromUrl);
-    return fromUrl;
+  if(fromUrl) return saveFilterProvider(fromUrl);
+  return getSavedFilterProvider();
+}
+
+async function detectFilterProviderOnce(){
+  const fromUrl = getUrlFilterProvider();
+  if(fromUrl) return saveFilterProvider(fromUrl);
+
+  if(hasFreshSavedFilterProvider()){
+    return getSavedFilterProvider();
   }
 
-  const saved = getSavedFilterProviderRecord();
-  if(isFreshFilterProviderRecord(saved)){
-    return normalizeFilterProvider(saved.provider);
-  }
+  const results = await Promise.all([
+    canReachNetfreeProbeUrl("https://api.internal.netfree.link/user/0"),
+    canReachNetfreeProbeUrl("https://certx2.internal.netfree.link/user/0")
+  ]);
 
-  if(filterProviderDetectingPromise) return filterProviderDetectingPromise;
-
-  filterProviderDetectingPromise = (async()=>{
-    const before = getCurrentFilterProvider();
-
-    let isNetfree = false;
-    try{
-      const results = await Promise.all([
-        canReachNetfreeProbeUrl("https://api.internal.netfree.link/user/0"),
-        canReachNetfreeProbeUrl("https://certx2.internal.netfree.link/user/0")
-      ]);
-      isNetfree = results.some(Boolean);
-    }catch{
-      isNetfree = false;
-    }
-
-    const detected = saveFilterProvider(isNetfree ? "netfree" : "etrog");
-
-    // אם נטען כבר אתרוג ואז זוהה נטפרי — מרנדרים מחדש כדי להציג תצוגה סגורה.
-    if(before !== detected){
-      render().catch(showErr);
-    }
-
-    return detected;
-  })().finally(()=>{
-    filterProviderDetectingPromise = null;
-  });
-
-  return filterProviderDetectingPromise;
+  const isNetfree = results.some(Boolean);
+  return saveFilterProvider(isNetfree ? "netfree" : "etrog");
 }
 
 function withFilterProvider(url){
@@ -558,11 +523,11 @@ async function updateNetfreeProbeBanner(){
   const el = document.getElementById("netfreeProbeBanner");
   if(!el) return;
 
-  const provider = await detectFilterProviderIfNeeded().catch(() => getCurrentFilterProvider());
+  const provider = getCurrentFilterProvider();
   const isNetfree = provider === "netfree";
 
   el.textContent = isNetfree
-    ? "בדיקת סינון: נראה שאתה גולש דרך נטפרי"
+    ? "בדיקת סינון: זוהתה גלישה דרך נטפרי — תוצג תצוגת נטפרי"
     : "בדיקת סינון: לא זוהתה גלישה דרך נטפרי — תוצג תצוגת אתרוג";
 
   el.style.background = isNetfree ? "#f1fff5" : "#fff8f0";
@@ -2168,5 +2133,7 @@ async function render(){
 /* init */
 hookLinks();
 headerSearch();
-render().catch(showErr);
-detectFilterProviderIfNeeded().catch(() => saveFilterProvider("etrog"));
+
+detectFilterProviderOnce()
+  .catch(() => saveFilterProvider("etrog"))
+  .finally(() => render().catch(showErr));
