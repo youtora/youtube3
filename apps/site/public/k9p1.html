@@ -46,10 +46,12 @@ https://www.youtube.com/c/SomeChannel"
       <option value="2">2 — בדיקה בנטפרי, פתוח באתרוג</option>
       <option value="3" selected>3 — בדיקה בנטפרי ואתרוג</option>
       <option value="4">4 — רגיש בנטפרי ואתרוג</option>
+      <option value="5">5 — חסום לגמרי בנטפרי, פתוח לגמרי באתרוג</option>
+      <option value="6">6 — חסום לגמרי בנטפרי, רגיש באתרוג</option>
     </select>
 
     <div style="font-size:13px;color:#555;line-height:1.6;margin-top:8px">
-      1: כל הסרטונים פתוחים. 2: נטפרי בודק, אתרוג פתוח. 3: אתרוג פתוח חוץ מחסומי נטפרי. 4: אתרוג מציג רק מה שנפתח בנטפרי.
+      1: כל הסרטונים פתוחים. 2: נטפרי בודק, אתרוג פתוח. 3: אתרוג פתוח חוץ מחסומי נטפרי. 4: אתרוג מציג רק מה שנפתח בנטפרי. 5: נטפרי חסום לגמרי, אתרוג פתוח. 6: נטפרי חסום לגמרי, אתרוג רגיש.
     </div>
   </div>
 
@@ -132,7 +134,7 @@ https://www.youtube.com/c/SomeChannel"
 
   function normalizeFilterPolicyValue(value){
     const n = Number(value);
-    return [1,2,3,4].includes(n) ? n : 3;
+    return [1,2,3,4,5,6].includes(n) ? n : 3;
   }
 
   function filterPolicyLabel(value){
@@ -141,6 +143,8 @@ https://www.youtube.com/c/SomeChannel"
       case 2: return "בדיקה בנטפרי, פתוח באתרוג";
       case 3: return "בדיקה בנטפרי ואתרוג";
       case 4: return "רגיש בנטפרי ואתרוג";
+      case 5: return "חסום לגמרי בנטפרי, פתוח לגמרי באתרוג";
+      case 6: return "חסום לגמרי בנטפרי, רגיש באתרוג";
       default: return "בדיקה בנטפרי ואתרוג";
     }
   }
@@ -324,9 +328,9 @@ https://www.youtube.com/c/SomeChannel"
               </td>
               <td style="padding:8px">
                 <div style="font-weight:600">${esc(filterPolicyLabel(c.filter_policy))}</div>
-                <div style="font-size:12px;color:#666">נטפרי: ${Number(c.netfree_default_status) === 1 ? "פתוח" : "לבדיקה"} · רשימת ערוצים: ${Number(c.show_in_public_channels) === 0 ? "מוסתר עד פתיחה" : "מופיע"}</div>
+                <div style="font-size:12px;color:#666">נטפרי: ${Number(c.netfree_default_status) === 1 ? "פתוח" : (Number(c.netfree_default_status) === 2 ? "חסום" : "לבדיקה")} · רשימת ערוצים: ${Number(c.show_in_public_channels) === 0 ? "מוסתר עד פתיחה" : "מופיע"}</div>
                 <select onchange="setChannelFilterPolicy('${esc(c.channel_id)}', this.value)" style="margin-top:6px;max-width:260px">
-                  ${[1,2,3,4].map((p)=>`<option value="${p}" ${normalizeFilterPolicyValue(c.filter_policy) === p ? "selected" : ""}>${p} — ${esc(filterPolicyLabel(p))}</option>`).join("")}
+                  ${[1,2,3,4,5,6].map((p)=>`<option value="${p}" ${normalizeFilterPolicyValue(c.filter_policy) === p ? "selected" : ""}>${p} — ${esc(filterPolicyLabel(p))}</option>`).join("")}
                 </select>
               </td>
               <td style="padding:8px">
@@ -564,7 +568,7 @@ https://www.youtube.com/c/SomeChannel"
     const filter_policy = normalizeFilterPolicyValue(policy_value);
     const message = `להחליף את מצב הסינון של הערוץ ל: ${filterPolicyLabel(filter_policy)}?
 
-שים לב: פעולה זו מעדכנת גם את etrog_visible לכל סרטוני הערוץ, ובמצב 1/מעבר ממצב 1 היא עשויה לעדכן גם netfree_status.`;
+שים לב: פעולה זו מעדכנת גם את etrog_visible לכל סרטוני הערוץ. במצב 1 היא פותחת בנטפרי, ובמצבים 5/6 היא מסמנת את סרטוני הערוץ כחסומים בנטפרי כדי שלא יישלחו לבדיקה.`;
 
     if(!confirm(message)) {
       loadChannels();

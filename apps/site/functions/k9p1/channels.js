@@ -1,5 +1,5 @@
 import { getDB } from "../_db.js";
-import { netfreeDefaultStatusForPolicy, normalizeFilterPolicy, showInPublicChannelsForPolicy } from "../_shared/filter-policy.js";
+import { isNetfreeForcedPolicy, netfreeDefaultStatusForPolicy, netfreeStatusForForcedPolicy, normalizeFilterPolicy, showInPublicChannelsForPolicy } from "../_shared/filter-policy.js";
 // functions/admin/channels.js
 
 function unauthorized() { return new Response("unauthorized", { status: 401 }); }
@@ -75,7 +75,6 @@ export async function onRequest({ env, request }) {
 
       const filter_policy = normalizeFilterPolicy(requestedPolicy, 3);
       const previousPolicy = normalizeFilterPolicy(ch.filter_policy ?? (Number(ch.netfree_default_status) === 1 ? 1 : 3), 3);
-      const previousWasOpenAll = previousPolicy === 1 || Number(ch.netfree_default_status) === 1;
       const netfree_default_status = netfreeDefaultStatusForPolicy(filter_policy);
       const show_in_public_channels = showInPublicChannelsForPolicy(filter_policy);
       const t = nowSec();
@@ -91,18 +90,36 @@ export async function onRequest({ env, request }) {
       `).bind(filter_policy, netfree_default_status, show_in_public_channels, t, channel_int).run();
 
       let videoUpdate;
+      const previousWasForced = isNetfreeForcedPolicy(previousPolicy) || Number(ch.netfree_default_status) === 1 || Number(ch.netfree_default_status) === 2;
+      const currentIsForced = isNetfreeForcedPolicy(filter_policy);
 
-      if (filter_policy === 1) {
+      if (currentIsForced) {
         videoUpdate = await env.DB.prepare(`
           UPDATE videos
           SET
-            netfree_status = CASE WHEN netfree_status = 4 THEN 4 ELSE 1 END,
-            etrog_visible = CASE WHEN netfree_status = 4 THEN 0 ELSE 1 END,
+            netfree_status = CASE
+              WHEN netfree_status = 4 THEN 4
+              ELSE ?
+            END,
+            etrog_visible = CASE
+              WHEN netfree_status = 4 THEN 0
+              WHEN ? = 1 THEN 1
+              WHEN ? = 5 THEN 1
+              WHEN ? = 6 THEN 0
+              ELSE 0
+            END,
             netfree_recheck_after = NULL,
             updated_at = ?
           WHERE channel_int = ?
-        `).bind(t, channel_int).run();
-      } else if (previousWasOpenAll) {
+        `).bind(
+          netfreeStatusForForcedPolicy(filter_policy, 0),
+          filter_policy,
+          filter_policy,
+          filter_policy,
+          t,
+          channel_int
+        ).run();
+      } else if (previousWasForced) {
         videoUpdate = await env.DB.prepare(`
           UPDATE videos
           SET

@@ -347,7 +347,12 @@ function normalizeVideoKindForDb(value){
 
 function normalizeFilterPolicyForDb(value, fallback = 3){
   const n = Number(value);
-  return [1, 2, 3, 4].includes(n) ? n : fallback;
+  return [1, 2, 3, 4, 5, 6].includes(n) ? n : fallback;
+}
+
+function normalizeNetfreeDefaultStatusForDb(value){
+  const n = Number(value);
+  return [0, 1, 2, 3, 4, 5].includes(n) ? n : 0;
 }
 
 function etrogVisibleFromPolicyStatus(policy, status){
@@ -358,6 +363,8 @@ function etrogVisibleFromPolicyStatus(policy, status){
   if(p === 2) return 1;
   if(p === 3) return s === 2 ? 0 : 1;
   if(p === 4) return s === 1 ? 1 : 0;
+  if(p === 5) return 1;
+  if(p === 6) return s === 1 ? 1 : 0;
   return 0;
 }
 
@@ -772,7 +779,7 @@ function videoUpsertAndMetaStmts(env, rows, ts){
       title: String(raw?.title || "").slice(0, 200) || "[untitled]",
       published_at: Number(raw?.published_at || 0) || 0,
       channel_language_code: raw?.channel_language_code || raw?.language_code || "",
-      netfree_default_status: Number(raw?.netfree_default_status) === 0 ? 0 : 1,
+      netfree_default_status: normalizeNetfreeDefaultStatusForDb(raw?.netfree_default_status),
       filter_policy: normalizeFilterPolicyForDb(raw?.filter_policy, Number(raw?.netfree_default_status) === 1 ? 1 : 3)
     });
   }
@@ -899,7 +906,7 @@ async function upsertVideosAndMetaDirect(env, rows, ts){
       title: String(raw?.title || "").slice(0, 200) || "[untitled]",
       published_at: Number(raw?.published_at || 0) || 0,
       channel_language_code: raw?.channel_language_code || raw?.language_code || "",
-      netfree_default_status: Number(raw?.netfree_default_status) === 0 ? 0 : 1,
+      netfree_default_status: normalizeNetfreeDefaultStatusForDb(raw?.netfree_default_status),
       filter_policy: normalizeFilterPolicyForDb(raw?.filter_policy, Number(raw?.netfree_default_status) === 1 ? 1 : 3)
     });
   }
@@ -1177,7 +1184,7 @@ async function backfillSome(env, maxCalls=1){
           title: String(sn?.title || "").slice(0,200) || "[untitled]",
           published_at: toUnixSeconds(sn?.publishedAt || null) || 0,
           channel_language_code: r.language_code || "",
-          netfree_default_status: r.netfree_default_status ?? 1,
+          netfree_default_status: normalizeNetfreeDefaultStatusForDb(r.netfree_default_status),
           filter_policy: r.filter_policy ?? (Number(r.netfree_default_status) === 1 ? 1 : 3)
         });
       }
@@ -1408,7 +1415,7 @@ async function catchUpFeeds(env, maxChannels=5){
             title: String(e.title || "").slice(0, 200) || "[untitled]",
             published_at: e.published_at || 0,
             channel_language_code: ch.language_code || "",
-            netfree_default_status: ch.netfree_default_status ?? 1,
+            netfree_default_status: normalizeNetfreeDefaultStatusForDb(ch.netfree_default_status),
             filter_policy: ch.filter_policy ?? (Number(ch.netfree_default_status) === 1 ? 1 : 3)
           });
         }

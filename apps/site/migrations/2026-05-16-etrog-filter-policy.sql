@@ -5,6 +5,8 @@
 -- 2 = NetFree checked, Etrog open
 -- 3 = NetFree checked, Etrog blocks what NetFree blocked
 -- 4 = sensitive: Etrog shows only what NetFree opened
+-- 5 = NetFree fully blocked, Etrog fully open
+-- 6 = NetFree fully blocked, Etrog sensitive
 
 ALTER TABLE channels ADD COLUMN filter_policy INTEGER NOT NULL DEFAULT 3;
 ALTER TABLE videos ADD COLUMN etrog_visible INTEGER NOT NULL DEFAULT 0;
@@ -15,7 +17,7 @@ SET filter_policy = CASE
   ELSE 3
 END
 WHERE filter_policy IS NULL
-   OR filter_policy NOT IN (1, 2, 3, 4);
+   OR filter_policy NOT IN (1, 2, 3, 4, 5, 6);
 
 UPDATE videos
 SET etrog_visible = CASE
@@ -25,6 +27,9 @@ SET etrog_visible = CASE
   WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 3
        AND COALESCE(netfree_status, 0) <> 2 THEN 1
   WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 4
+       AND COALESCE(netfree_status, 0) = 1 THEN 1
+  WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 5 THEN 1
+  WHEN COALESCE((SELECT filter_policy FROM channels WHERE channels.id = videos.channel_int), 3) = 6
        AND COALESCE(netfree_status, 0) = 1 THEN 1
   ELSE 0
 END;

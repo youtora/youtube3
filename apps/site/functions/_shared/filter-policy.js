@@ -2,18 +2,49 @@ export const FILTER_POLICY_OPEN_ALL = 1;
 export const FILTER_POLICY_NETFREE_CHECK_ETROG_OPEN = 2;
 export const FILTER_POLICY_NETFREE_ETROG_CHECK = 3;
 export const FILTER_POLICY_SENSITIVE = 4;
+export const FILTER_POLICY_NETFREE_BLOCKED_ETROG_OPEN = 5;
+export const FILTER_POLICY_NETFREE_BLOCKED_ETROG_SENSITIVE = 6;
+
+const VALID_FILTER_POLICIES = [1, 2, 3, 4, 5, 6];
 
 export function normalizeFilterPolicy(value, fallback = FILTER_POLICY_NETFREE_ETROG_CHECK) {
   const n = Number(value);
-  return [1, 2, 3, 4].includes(n) ? n : fallback;
+  return VALID_FILTER_POLICIES.includes(n) ? n : fallback;
 }
 
 export function netfreeDefaultStatusForPolicy(policy) {
-  return normalizeFilterPolicy(policy) === FILTER_POLICY_OPEN_ALL ? 1 : 0;
+  const p = normalizeFilterPolicy(policy);
+
+  // 1 = פתוח לגמרי בנטפרי.
+  if (p === FILTER_POLICY_OPEN_ALL) return 1;
+
+  // 5/6 = חסום לגמרי בנטפרי, לא לשלוח לבדיקה.
+  if (p === FILTER_POLICY_NETFREE_BLOCKED_ETROG_OPEN || p === FILTER_POLICY_NETFREE_BLOCKED_ETROG_SENSITIVE) return 2;
+
+  // 2/3/4 = בדיקה רגילה בנטפרי.
+  return 0;
 }
 
 export function showInPublicChannelsForPolicy(policy) {
   return normalizeFilterPolicy(policy) === FILTER_POLICY_OPEN_ALL ? 1 : 0;
+}
+
+export function isNetfreeForcedPolicy(policy) {
+  const p = normalizeFilterPolicy(policy);
+  return p === FILTER_POLICY_OPEN_ALL || p === FILTER_POLICY_NETFREE_BLOCKED_ETROG_OPEN || p === FILTER_POLICY_NETFREE_BLOCKED_ETROG_SENSITIVE;
+}
+
+export function netfreeStatusForForcedPolicy(policy, currentStatus = 0) {
+  const p = normalizeFilterPolicy(policy);
+  const s = Number(currentStatus);
+
+  // 4 = לא זמין. לא משנים אותו בכוח.
+  if (s === 4) return 4;
+
+  if (p === FILTER_POLICY_OPEN_ALL) return 1;
+  if (p === FILTER_POLICY_NETFREE_BLOCKED_ETROG_OPEN || p === FILTER_POLICY_NETFREE_BLOCKED_ETROG_SENSITIVE) return 2;
+
+  return 0;
 }
 
 export function etrogVisibleFromPolicyStatus(policy, status) {
@@ -27,6 +58,8 @@ export function etrogVisibleFromPolicyStatus(policy, status) {
   if (p === FILTER_POLICY_NETFREE_CHECK_ETROG_OPEN) return 1;
   if (p === FILTER_POLICY_NETFREE_ETROG_CHECK) return s === 2 ? 0 : 1;
   if (p === FILTER_POLICY_SENSITIVE) return s === 1 ? 1 : 0;
+  if (p === FILTER_POLICY_NETFREE_BLOCKED_ETROG_OPEN) return 1;
+  if (p === FILTER_POLICY_NETFREE_BLOCKED_ETROG_SENSITIVE) return s === 1 ? 1 : 0;
 
   return 0;
 }
@@ -38,6 +71,8 @@ export function etrogVisibleSqlCase(policySql = "COALESCE(c.filter_policy, 3)", 
     WHEN ${policySql} = 2 THEN 1
     WHEN ${policySql} = 3 AND ${statusSql} <> 2 THEN 1
     WHEN ${policySql} = 4 AND ${statusSql} = 1 THEN 1
+    WHEN ${policySql} = 5 THEN 1
+    WHEN ${policySql} = 6 AND ${statusSql} = 1 THEN 1
     ELSE 0
   END`;
 }
