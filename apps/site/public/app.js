@@ -233,6 +233,13 @@ function normalizeFilterProvider(value){
 
 function getSavedFilterProvider(){
   try{
+    const fromUrl = new URLSearchParams(location.search).get("provider");
+    if(fromUrl){
+      return saveFilterProvider(fromUrl);
+    }
+  }catch{}
+
+  try{
     const raw = localStorage.getItem(FILTER_PROVIDER_KEY);
     if(!raw) return "netfree";
     try{
@@ -414,14 +421,15 @@ function showErr(err){
 
 function setActiveNav(){
   const path = location.pathname.replace(/\/+$/,"") || "/";
+  const navPath = path === "/videos" ? "/" : path;
   const links = document.querySelectorAll('.nav .navLink[data-link]');
 
   links.forEach((link)=>{
     const href = (link.getAttribute('href') || '').replace(/\/+$/, '') || '/';
     let active = false;
 
-    if (href === '/') active = path === '/';
-    else active = path === href || path.startsWith(href + '/');
+    if (href === '/') active = navPath === '/';
+    else active = navPath === href || navPath.startsWith(href + '/');
 
     link.classList.toggle('active', active);
   });
@@ -2047,9 +2055,10 @@ async function pagePlaylist(playlist_id){
 /* ---------- ROUTER ---------- */
 async function render(){
   const { parts, qs } = route();
+  getSavedFilterProvider();
   setActiveNav();
 
-  if(parts.length === 0) return pageHome(qs);
+  if(parts.length === 0 || parts[0] === "videos") return pageHome(qs);
   if(parts[0] === "shorts") return pageShorts(qs);
   if(parts[0] === "live") return pageLive(qs);
   if(parts[0] === "channels") return pageChannels(qs);

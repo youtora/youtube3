@@ -311,7 +311,7 @@ async function servePlaylistsSitemap(env, url) {
 }
 
 function isLikelySpaRoute(path) {
-  if (path === "/" || path === "/shorts" || path === "/live" || path === "/channels" || path === "/playlists" || path === "/search") {
+  if (path === "/" || path === "/videos" || path === "/shorts" || path === "/live" || path === "/channels" || path === "/playlists" || path === "/search") {
     return true;
   }
 
@@ -622,12 +622,12 @@ async function resolveRoute({ url, env }) {
 }
 
 function getStaticMeta({ path, url }) {
-  if (path === "/") {
+  if (path === "/" || path === "/videos") {
     return {
-      canonical: `${url.origin}/`,
+      canonical: path === "/videos" ? `${url.origin}/videos` : `${url.origin}/`,
       type: "website",
       title: "Youtora | סרטונים מכל הערוצים",
-      description: "עמוד הבית של Youtora עם הסרטונים האחרונים מכל הערוצים.",
+      description: "עמוד הסרטונים של Youtora עם הסרטונים האחרונים מכל הערוצים.",
       image: `${url.origin}/default-og.png`,
       robots: "index,follow,max-image-preview:large",
       jsonLd: {
